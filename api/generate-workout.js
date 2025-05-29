@@ -1,6 +1,6 @@
-// pages/api/generate-workout.js
+// /api/generate-workout.js
 import { OpenAI } from 'openai';
-import exercises from '../../data/exercises.js'; // path may vary
+import exercises from '../data/exercises.js'; // ✅ Corrected relative path
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -9,17 +9,14 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 1. Validate incoming JSON
   const user = req.body;
   if (!user || typeof user !== 'object') {
     return res.status(400).json({ error: 'Invalid user input' });
   }
 
-  // 2. Build prompt with complete exercise info
   const prompt = buildWorkoutPrompt(user, exercises);
 
   try {
-    // 3. Query GPT-3.5
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [{ role: 'user', content: prompt }],
@@ -28,12 +25,10 @@ export default async function handler(req, res) {
 
     const gptContent = completion.choices[0]?.message?.content || '';
 
-    // 4. Try to parse JSON response
     let planJSON;
     try {
       planJSON = JSON.parse(gptContent);
     } catch {
-      // If parsing fails, wrap plain text
       planJSON = { raw_text: gptContent };
     }
 
@@ -44,9 +39,6 @@ export default async function handler(req, res) {
   }
 }
 
-/**
- * Generate the prompt sent to GPT
- */
 function buildWorkoutPrompt(user, allExercises) {
   const exerciseLines = allExercises.map(e => {
     const desc = e.description ? e.description.replace(/\n+/g, ' ') : 'No description';
