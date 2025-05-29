@@ -1,20 +1,27 @@
-// /api/generate-workout.js
 import { OpenAI } from 'openai';
-import exercises from '../data/exercises.js'; // ✅ Corrected relative path
+import exercises from '../data/exercises.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req, res) {
+  console.log('🔁 Request received at:', new Date().toISOString());
+
   if (req.method !== 'POST') {
+    console.warn('🚫 Invalid method:', req.method);
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   const user = req.body;
+
   if (!user || typeof user !== 'object') {
+    console.warn('⚠️ Invalid or missing user input');
     return res.status(400).json({ error: 'Invalid user input' });
   }
 
+  console.log('✅ Received user data:', user);
+
   const prompt = buildWorkoutPrompt(user, exercises);
+  console.log('🧠 Prompt sent to GPT:', prompt.slice(0, 1000)); // log partial prompt for readability
 
   try {
     const completion = await openai.chat.completions.create({
@@ -24,17 +31,20 @@ export default async function handler(req, res) {
     });
 
     const gptContent = completion.choices[0]?.message?.content || '';
+    console.log('📩 GPT raw response:', gptContent.slice(0, 1000)); // limit log length
 
     let planJSON;
     try {
       planJSON = JSON.parse(gptContent);
+      console.log('✅ Parsed workout plan JSON:', planJSON);
     } catch {
+      console.warn('⚠️ GPT response was not valid JSON. Returning raw text instead.');
       planJSON = { raw_text: gptContent };
     }
 
     return res.status(200).json({ plan: planJSON });
   } catch (err) {
-    console.error('GPT error:', err);
+    console.error('❌ GPT error:', err);
     return res.status(500).json({ error: 'Failed to generate workout plan' });
   }
 }
@@ -68,7 +78,6 @@ ${exerciseLines}
 5. Do **NOT** invent new exercises.
 
 ### REQUIRED OUTPUT (VALID JSON)
-\`\`\`json
 {
   "workout_plan": [
     {
@@ -84,7 +93,6 @@ ${exerciseLines}
     }
   ]
 }
-\`\`\`
 
 • Use exactly this schema (no extra keys).  
 • If you must explain anything, add a "notes" field on each exercise.  
