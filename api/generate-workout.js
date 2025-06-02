@@ -12,65 +12,99 @@ export default async function handler(req, res) {
   }
 
   const user = req.body;
-
   if (!user || typeof user !== 'object') {
     console.warn('⚠️ Invalid or missing user input');
     return res.status(400).json({ error: 'Invalid user input' });
   }
-
   console.log('✅ Received user data:', user);
 
+  /* ---------- Build prompt ---------- */
   const prompt = buildWorkoutPrompt(user, exercises);
-  console.log('🧠 Prompt sent to GPT:', prompt.slice(0, 1000)); // log first 1000 chars
+  console.log('🧠 Prompt sent to GPT:\n', prompt);
 
+  /* ---------- GPT call ---------- */
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7
+      temperature: 0.7,
+      max_tokens: 1500 // enough for 4-5 days × 6 exercises
     });
 
-    const gptContent = completion.choices[0]?.message?.content || '';
-    console.log('📩 GPT raw response:', gptContent.slice(0, 1000));
+    const gptContent = completion.choices[0]?.message?.content ?? '';
+    console.log('📩 GPT raw response (full):\n', gptContent);
 
+    /* ---------- Parse / validate ---------- */
     let planJSON;
     try {
       planJSON = JSON.parse(gptContent);
-
-      // ✅ Validate output: must have workout_plan array with valid weekdays and 6 exercises per day
-      const validDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-      const isValid = Array.isArray(planJSON?.workout_plan) &&
-        planJSON.workout_plan.every(day =>
-          validDays.includes(day.day) && Array.isArray(day.exercises) && day.exercises.length === 6
-        );
-
-      if (!isValid) {
-        console.warn('⚠️ GPT output invalid or missing expected structure.');
-        return res.status(500).json({ error: 'GPT returned malformed workout plan' });
-      }
-
-      console.log('✅ Parsed and validated workout plan JSON:', planJSON);
-      return res.status(200).json({ plan: planJSON });
-    } catch {
-      console.warn('⚠️ GPT response was not valid JSON. Returning raw text instead.');
-      return res.status(200).json({ raw_text: gptContent });
+      console.log('✅ Parsed plan JSON:\n', JSON.stringify(planJSON, null, 2));
+    } catch (err) {
+      console.warn('⚠️ GPT returned non-JSON. Sending raw text.');
+      return res.status(500).json({ error: 'Invalid GPT output', raw_text: gptContent });
     }
+
+    /* ---------- Structural validation ---------- */
+    const validDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const catalogNames = new Set(exercises.map(e => e.name));
+
+    const structureOK =
+      Array.isArray(planJSON.workout_plan) &&
+      planJSON.workout_plan.every(dayObj =>
+        validDays.includes(dayObj.day) &&
+        Array.isArray(dayObj.exercises) &&
+        dayObj.exercises.length === 6 &&
+        dayObj.exercises.every(ex => catalogNames.has(ex.name))
+      );
+
+    if (!structureOK) {
+      console.warn('⚠️ GPT output failed structural or catalog validation.');
+      return res
+        .status(500)
+        .json({ error: 'GPT returned malformed workout plan', raw_text: gptContent });
+    }
+
+    /* ---------- Success ---------- */
+    return res.status(200).json({ plan: planJSON });
   } catch (err) {
     console.error('❌ GPT error:', err);
     return res.status(500).json({ error: 'Failed to generate workout plan' });
   }
 }
 
-// 🧠 PROMPT BUILDER — Updated to enforce 6 exercises + weekday names
+/* ------------------------------------------------------------------ */
+/* ----------------------- Prompt Builder --------------------------- */
+/* ------------------------------------------------------------------ */
 function buildWorkoutPrompt(user, allExercises) {
-  const exerciseLines = allExercises.map(e => {
-    const desc = e.description ? e.description.replace(/\n+/g, ' ') : 'No description';
-    const weight = e.default_weight ? ` @ ${e.default_weight}` : '';
-    return `• ${e.name} — Muscle Group: ${e.muscle_group}, Equipment: ${e.equipment}, Difficulty: ${e.difficulty}, Tags: [${e.tags.join(', ')}], Description: ${desc}, Default: ${e.default_sets}x${e.default_reps}${weight}`;
-  }).join('\n');
+  /* --------- Exercise catalog --------- */
+  const exerciseLines = allExercises
+    .map(e => {
+      const desc = e.description ? e.description.replace(/\n+/g, ' ') : 'No description';
+      const weight = e.default_weight ? ` @ ${e.default_weight}` : '';
+      return `• ${e.name} — Muscle Group: ${e.muscle_group}, Equipment: ${e.equipment}, Difficulty: ${e.difficulty}, Tags: [${e.tags.join(
+        ', '
+      )}], Description: ${desc}, Default: ${e.default_sets}x${e.default_reps}${weight}`;
+    })
+    .join('\n');
+
+  /* --------- Dynamic safety rules --------- */
+  let riskBlock = '';
+  if (Array.isArray(user.health_risks)) {
+    if (user.health_risks.includes('pregnant')) {
+      riskBlock += `
+⚠️ The user is pregnant.  • Avoid high-impact or contact moves, supine work after 1st trimester, deep spinal flexion, max-effort Valsalva, or exercises that overly stress the core/pelvic floor.  • Prioritize stability, controlled tempo, and moderate RPE.`;
+    }
+    if (user.health_risks.some(r => /joint/i.test(r))) {
+      riskBlock += `
+⚠️ Joint issues present.  • Eliminate high-impact plyometrics, deep end-range loaded flexion/extension, and uncontrolled momentum.  • Favor machine or supported variations, neutral joint angles, and low-impact cardio.`;
+    }
+    // add more conditions here as needed
+  }
 
   const freq = user.exercise_frequency || 5;
+  const weekdayEnd = getEndDay(freq);
 
+  /* --------- Final prompt --------- */
   return `
 You are a certified personal trainer designing a custom *${freq}-day-per-week* workout plan for the user below.
 
@@ -78,18 +112,18 @@ You are a certified personal trainer designing a custom *${freq}-day-per-week* w
 ${JSON.stringify(user, null, 2)}
 
 ### EXERCISE CATALOG
-(Choose ONLY from this list. Do NOT invent any exercises.)
+(Choose ONLY from this list — do NOT invent or rename exercises.)
 ${exerciseLines}
 
 ---
 
 ### INSTRUCTIONS
-1. Match the user's goal, experience level, muscle group preferences, available equipment, and frequency.
-2. Build a ${freq}-day plan with workouts from **Monday to ${getEndDay(freq)}**.
+1. Match the user's goals, target muscles, experience, equipment access, and frequency.
+2. Build a ${freq}-day schedule from **Monday to ${weekdayEnd}**.
 3. Provide **exactly 6 exercises per day**.
-4. Only use exercises from the provided catalog. If there aren't enough unique options, repeat or vary existing ones (e.g., sets/reps/tempo).
-5. Include a short "notes" field for each exercise explaining its purpose or target.
-6. Use the following output format exactly — valid, raw JSON only.
+4. Reuse catalog exercises if necessary (vary sets, reps, tempo).
+5. Each exercise must include a short "notes" field.
+6. Output must be raw, valid JSON — no markdown fences, no extra keys.${riskBlock}
 
 ### REQUIRED OUTPUT (VALID JSON)
 {
@@ -97,25 +131,18 @@ ${exerciseLines}
     {
       "day": "Monday",
       "exercises": [
-        {
-          "name": "Bodyweight Squat",
-          "sets": 3,
-          "reps": 12,
-          "notes": "Targets quads and glutes."
-        },
+        { "name": "Example Exercise", "sets": 3, "reps": 10, "notes": "Why it's chosen." },
         ...
       ]
     },
     ...
   ]
 }
-
-Do NOT wrap the JSON in markdown fences. Just return raw, valid JSON.
 `;
 }
 
-// Weekday label helper
+/* Helper to map frequency → last weekday label */
 function getEndDay(freq) {
-  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  return days[Math.min(freq - 1, 6)];
+  const weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  return weekdays[Math.min(freq - 1, 6)];
 }
