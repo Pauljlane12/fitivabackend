@@ -7,38 +7,33 @@ export default async function handler(req, res) {
   console.log('🔁 Request received at:', new Date().toISOString());
 
   if (req.method !== 'POST') {
-    console.warn('🚫 Invalid method:', req.method);
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   const user = req.body;
   if (!user || typeof user !== 'object') {
-    console.warn('⚠️ Invalid or missing user input');
     return res.status(400).json({ error: 'Invalid user input' });
   }
-  console.log('✅ Received user data:', user);
+  console.log('✅ User data:', user);
 
-  /* ---------- Build prompt ---------- */
   const prompt = buildWorkoutPrompt(user, exercises);
-  console.log('🧠 Prompt sent to GPT:\n', prompt);
+  console.log('🧠 GPT-4o prompt:\n', prompt.slice(0, 1000) + '...');
 
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      max_tokens: 2000,
+      temperature: 0.6,
+      max_tokens: 1800,
     });
 
     const gptContent = completion.choices[0]?.message?.content ?? '';
-    console.log('📩 GPT raw response (full):\n', gptContent);
+    console.log('📩 GPT response:\n', gptContent);
 
     let planJSON;
     try {
       planJSON = JSON.parse(gptContent);
-      console.log('✅ Parsed plan JSON:\n', JSON.stringify(planJSON, null, 2));
-    } catch (err) {
-      console.warn('⚠️ GPT returned non-JSON. Sending raw text.');
+    } catch {
       return res.status(500).json({ error: 'Invalid GPT output', raw_text: gptContent });
     }
 
@@ -51,7 +46,7 @@ export default async function handler(req, res) {
       planJSON.workout_plan.every(dayObj =>
         validDays.includes(dayObj.day) &&
         (
-          (dayObj.exercises === "Rest") ||
+          (dayObj.exercises === 'Rest') ||
           (
             Array.isArray(dayObj.exercises) &&
             dayObj.exercises.length === 6 &&
@@ -61,11 +56,7 @@ export default async function handler(req, res) {
       );
 
     if (!structureOK) {
-      console.warn('⚠️ GPT output failed structural or catalog validation.');
-      return res.status(500).json({
-        error: 'GPT returned malformed workout plan',
-        raw_text: gptContent,
-      });
+      return res.status(500).json({ error: 'Malformed workout plan', raw_text: gptContent });
     }
 
     return res.status(200).json({ plan: planJSON });
@@ -75,67 +66,59 @@ export default async function handler(req, res) {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* ----------------------- Prompt Builder --------------------------- */
-/* ------------------------------------------------------------------ */
+/* --------------------- PROMPT BUILDER --------------------- */
 function buildWorkoutPrompt(user, allExercises) {
-  const exerciseLines = allExercises
-    .map(e => {
-      const desc = e.description ? e.description.replace(/\n+/g, ' ') : 'No description';
-      const weight = e.default_weight ? ` @ ${e.default_weight}` : '';
-      return `• ${e.name} — Muscle Group: ${e.muscle_group}, Equipment: ${e.equipment}, Difficulty: ${e.difficulty}, Tags: [${e.tags.join(', ')}], Description: ${desc}, Default: ${e.default_sets}x${e.default_reps}${weight}`;
-    })
-    .join('\n');
+  const selectedMuscleGroups = new Set(user.target_muscle_groups || []);
+  const filteredCatalog = allExercises.filter(e => selectedMuscleGroups.has(e.muscle_group));
+  const compactCatalog = filteredCatalog.map(e =>
+    `• ${e.name} — ${e.muscle_group}, ${e.equipment}, [${e.tags.join(', ')}]`
+  ).join('\n');
 
-  let riskBlock = '';
-  if (Array.isArray(user.health_risks)) {
-    if (user.health_risks.includes('pregnant')) {
-      riskBlock += `
-⚠️ The user is pregnant. Avoid high-impact or contact moves, supine work after 1st trimester, deep spinal flexion, max-effort Valsalva, or exercises that overly stress the core/pelvic floor. Prioritize stability, controlled tempo, and moderate RPE.`;
-    }
-    if (user.health_risks.some(r => /joint/i.test(r))) {
-      riskBlock += `
-⚠️ Joint issues present. Avoid high-impact plyometrics, deep loaded flexion/extension, and uncontrolled momentum. Favor machine or supported variations, neutral joint angles, and low-impact cardio.`;
-    }
+  const freq = user.exercise_frequency || 4;
+
+  // Smart rest-day spacing guidance
+  const spacingExamples = {
+    3: 'Mon / Wed / Fri',
+    4: 'Mon / Tue / Thu / Sat',
+    5: 'Mon / Tue / Thu / Fri / Sun'
+  };
+  const spacingTip = spacingExamples[freq]
+    ? `Distribute workouts across the week. Example for ${freq} days: ${spacingExamples[freq]}. Avoid stacking all training days in a row.`
+    : 'Distribute workouts to allow for recovery between sessions.';
+
+  let riskFlags = '';
+  if (user.health_risks?.includes('pregnant')) {
+    riskFlags += '\n- Pregnant: Avoid supine/core stress, favor low-impact controlled movements.';
+  }
+  if (user.health_risks?.some(r => /joint/i.test(r))) {
+    riskFlags += '\n- Joint issues: Avoid deep flexion, high impact, and unstable loads.';
   }
 
-  const freq = user.exercise_frequency || 5;
-
   return `
-You are a certified personal trainer. Create a **7-day workout schedule** (Monday–Sunday) for the following user.
+You are a personal trainer. Create a 7-day plan (Mon–Sun) for this user.
 
-### USER PROFILE (JSON)
-${JSON.stringify(user, null, 2)}
+Train ${freq} days/week using a push/pull/legs mindset. All other days must be: "exercises": "Rest".
+Only use these muscle groups: [${[...selectedMuscleGroups].join(', ')}].
+Only use exercises from the catalog below (no inventing or renaming).
 
-### EXERCISE CATALOG
-(Choose ONLY from this list — do NOT invent or rename exercises.)
-${exerciseLines}
+${spacingTip}
+Give exactly 6 exercises per workout day. Each must include: name, sets, reps, notes.
 
----
+USER:
+- Gender: ${user.gender}
+- Goal: ${user.goal}
+- Equipment: ${user.available_equipment?.join(', ') || 'None'}
+- Experience: ${user.training_experience}${riskFlags}
 
-### INSTRUCTIONS
-1. The user wants to train **${freq} days per week**. The remaining days should be labeled as "Rest".
-2. Provide exactly **6 exercises** for each training day. Rest days must simply be: "exercises": "Rest"
-3. Match the user's goals, injuries, equipment, and training experience.
-4. Prioritize full-body balance, safe intensity, and tag-appropriate exercises.
-5. Each exercise must include: { name, sets, reps, notes }.
-6. Return output as raw, valid JSON. NO markdown or commentary.${riskBlock}
+EXERCISE CATALOG:
+${compactCatalog}
 
-### OUTPUT FORMAT
+Return valid raw JSON (no markdown, no comments). Format:
 {
   "workout_plan": [
-    {
-      "day": "Monday",
-      "exercises": [
-        { "name": "Squat", "sets": 3, "reps": 10, "notes": "Primary compound lift for lower body" },
-        ...
-      ]
-    },
+    { "day": "Monday", "exercises": [ { "name": "X", "sets": 3, "reps": 10, "notes": "..." }, ... ] },
     ...
-    {
-      "day": "Sunday",
-      "exercises": "Rest"
-    }
+    { "day": "Sunday", "exercises": "Rest" }
   ]
 }
 `;
