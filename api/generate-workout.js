@@ -1,7 +1,7 @@
 // pages/api/generate-workout.js
 import { OpenAI } from 'openai';
-import { z } from 'zod'; // Added for input validation
-import exercises from '../data/exercises.js'; // Assuming this path is correct and exercises.js exports an array
+import { z } from 'zod'; // For input validation
+import exercises from '../data/exercises.js'; // Ensure this path is correct
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -15,7 +15,7 @@ const userSchema = z.object({
   health_risks: z.array(z.string()).optional().default([]),
   has_gym_access: z.boolean().optional().default(false),
   home_equipment: z.array(z.string()).optional().default([]),
-  // Add any other expected user properties here
+  // Add any other expected user properties here, ensuring no stray commas if you modify
 });
 
 // Constant for accessory exercise whitelist
@@ -32,7 +32,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Validate request body against the schema
   let validatedUser;
   try {
     validatedUser = userSchema.parse(req.body);
@@ -41,10 +40,9 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid user data', details: error.flatten() });
   }
 
-  const user = validatedUser; // Use the validated and defaulted user data
-  const allowedEquip = deriveAllowedEquipment(user); // Derive allowed equipment once
+  const user = validatedUser;
+  const allowedEquip = deriveAllowedEquipment(user);
 
-  /* ── We allow ONE automatic retry ── */
   for (let attempt = 1; attempt <= 2; attempt++) {
     const prompt = buildPrompt(user, exercises, allowedEquip, ACCESSORY_WHITELIST);
     console.log(`🧠 Prompt (attempt ${attempt}) – ${prompt.length} chars`);
@@ -53,9 +51,8 @@ export default async function handler(req, res) {
       const { choices } = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.55, // Adjust as needed; lower for more deterministic, higher for more creative
-        max_tokens: 2000, // Increased slightly just in case, adjust based on typical output
-        // Consider adding response_format: { type: "json_object" } if consistently expecting JSON (for newer models)
+        temperature: 0.55,
+        max_tokens: 2000, // Trailing comma here is valid in modern JavaScript
       });
 
       let txt = (choices?.[0]?.message?.content || '')
@@ -75,7 +72,7 @@ export default async function handler(req, res) {
         plan = JSON.parse(txt);
       } catch (parseError) {
         console.warn(`❗ GPT did not return valid JSON on attempt ${attempt}:`, parseError.message);
-        console.log('Raw non-JSON text from GPT:\n', txt.slice(0, 500)); // Log a snippet
+        console.log('Raw non-JSON text from GPT (first 500 chars):\n', txt.slice(0, 500));
         if (attempt === 2) return res.status(500).json({ error: 'GPT did not return valid JSON twice' });
         continue;
       }
@@ -94,7 +91,7 @@ export default async function handler(req, res) {
       let errorMessage = 'GPT request failed';
       let errorDetails = null;
 
-      if (err instanceof OpenAI.APIError) { // More specific OpenAI error handling
+      if (err instanceof OpenAI.APIError) {
         console.error('❌ OpenAI API Error Status:', err.status);
         console.error('❌ OpenAI API Error Type:', err.type);
         console.error('❌ OpenAI API Error Code:', err.code);
@@ -105,10 +102,8 @@ export default async function handler(req, res) {
         console.error('❌ GPT Request/Unknown Error:', err.message);
         errorMessage = `GPT request error: ${err.message}`;
       }
-      // console.error('Full GPT request error object:', err); // Uncomment for full error details during dev
+      // For full debugging: console.error('Full GPT request error object:', err);
 
-      // Decide if retry is appropriate. Some errors (e.g., auth, quota) shouldn't be retried.
-      // For simplicity here, we retry once for any error, but you might refine this.
       if (attempt === 2) {
         return res.status(500).json({ error: errorMessage, details: errorDetails });
       }
@@ -121,28 +116,23 @@ export default async function handler(req, res) {
 /** ──────────────────────────────────────────────────────────
  * PLAN VALIDATOR
  * ──────────────────────────────────────────────────────────*/
-// NOTE: The validation rules (e.g., EXACTLY 6 exercises, sets === 3) are very strict.
-// If you experience frequent validation failures, consider making these rules more flexible
-// (e.g., a range for exercises 5-7, sets 2-4) and update the prompt accordingly.
 function validatePlan(plan, user, allowedEquip, accessoryWL, fullExerciseCatalog) {
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   const byName = Object.fromEntries(fullExerciseCatalog.map(e => [e.name, e]));
 
   if (!plan || !Array.isArray(plan.workout_plan) || plan.workout_plan.length !== 7) {
-    console.warn('Validation fail: Plan structure (workout_plan array length not 7)');
+    console.warn('Validation fail: Plan structure (workout_plan array or length issue)');
     return false;
   }
 
   return plan.workout_plan.every(d => {
-    if (!d || !days.includes(d.day)) {
+    if (!d || typeof d.day !== 'string' || !days.includes(d.day)) {
       console.warn(`Validation fail: Invalid day object or day name: ${d?.day}`);
       return false;
     }
 
-    if (d.exercises === 'Rest') return true; // Rest day is fine
+    if (d.exercises === 'Rest') return true;
 
-    // For workout days:
-    // CURRENTLY STRICT: EXACTLY 6 exercises. Consider a range if too restrictive.
     if (!Array.isArray(d.exercises) || d.exercises.length !== 6) {
       console.warn(`Validation fail: Day ${d.day} - exercises array invalid or length not 6 (found ${d.exercises?.length})`);
       return false;
@@ -168,33 +158,28 @@ function validatePlan(plan, user, allowedEquip, accessoryWL, fullExerciseCatalog
       const needsWeight = ref.equipment !== 'bodyweight' && ref.equipment !== 'resistance_band';
       const weightOk = needsWeight
         ? typeof ex.start_weight_lb === 'number' && ex.start_weight_lb > 0
-        : ex.start_weight_lb === undefined || ex.start_weight_lb === null; // Allow null or undefined if not needed
+        : ex.start_weight_lb === undefined || ex.start_weight_lb === null;
       if (!weightOk) {
         console.warn(`Validation fail: Day ${d.day}, Ex: "${ex.name}" - start_weight_lb issue (needs weight: ${needsWeight}, provided: ${ex.start_weight_lb})`);
         return false;
       }
 
-      // CURRENTLY STRICT: sets === 3. Consider a range if too restrictive.
       const setsOk = ex.sets === 3;
       if(!setsOk) {
         console.warn(`Validation fail: Day ${d.day}, Ex: "${ex.name}" - sets not 3 (found ${ex.sets})`);
         return false;
       }
 
-      // Reps must be a number or a string like "8-12" (if you allow ranges, adjust parsing and validation)
-      // Current prompt suggests "reps:6-12", implying a single number is chosen by GPT within that range.
       const repsOk = typeof ex.reps === 'number' && ex.reps >= 6 && ex.reps <= 12;
       if(!repsOk) {
         console.warn(`Validation fail: Day ${d.day}, Ex: "${ex.name}" - reps not between 6-12 (found ${ex.reps})`);
         return false;
       }
 
-      // Notes should be a string, if provided
       if (ex.notes !== undefined && typeof ex.notes !== 'string') {
         console.warn(`Validation fail: Day ${d.day}, Ex: "${ex.name}" - notes is not a string.`);
         return false;
       }
-
       return true;
     });
   });
@@ -215,17 +200,11 @@ function buildPrompt(user, catalog, allowedEquip, accessoryWL) {
   );
 
   if (usableExercises.length === 0) {
-    // This is a critical issue: no exercises match the criteria.
-    // The LLM will not be able to create a plan.
-    // Consider how to handle this: either throw an error earlier,
-    // or try to broaden criteria (though risky for user satisfaction).
-    console.warn("⚠️ No usable exercises found after filtering for prompt building. The plan generation will likely fail or produce poor results.");
-    // You might want to return a specific error or a simplified prompt acknowledging this
+    console.warn("⚠️ No usable exercises found after filtering for prompt building. Plan generation may fail or be poor.");
   }
 
-
   const catalogLines = usableExercises
-    .map(e => `• ${e.name} — Muscles: ${e.muscle_group}, Equipment: ${e.equipment}`) // Added more detail
+    .map(e => `• ${e.name} — Muscles: ${e.muscle_group}, Equipment: ${e.equipment}`)
     .join('\n');
 
   const freq = user.exercise_frequency;
@@ -236,13 +215,14 @@ function buildPrompt(user, catalog, allowedEquip, accessoryWL) {
     4: 'E.g., Mon/Tue/Thu/Fri (upper/lower split or similar)',
     5: 'E.g., Mon/Tue/Thu/Fri/Sat (e.g., push/pull/legs/upper/lower)',
     6: 'E.g., Mon-Sat with one rest day, ensure muscle group recovery',
-    7: 'Daily training, vary intensity and muscle groups heavily',
+    7: 'Daily training, vary intensity and muscle groups heavily', // Trailing comma here is valid
   };
   const spacing = spacingOptions[freq] || `spread ${freq} training days smartly for recovery, ensuring adequate rest between working the same muscle groups.`;
 
   const bodyWeightLb = user.weight_lb;
   const experienceLevel = user.fitness_experience;
-  const strengthMultiplier = { beginner: 0.3, intermediate: 0.5, advanced: 0.7 }[experienceLevel] || 0.5;
+  const strengthMultiplierTable = { beginner: 0.3, intermediate: 0.5, advanced: 0.7 };
+  const strengthMultiplier = strengthMultiplierTable[experienceLevel] || 0.5;
   const estimatedBaseWeight = (bodyWeightLb * strengthMultiplier).toFixed(0);
 
   let healthFlags = '';
@@ -252,9 +232,7 @@ function buildPrompt(user, catalog, allowedEquip, accessoryWL) {
   if (user.health_risks?.some(r => /joint/i.test(r))) {
     healthFlags += '\n- User has joint issues: Prioritize low-impact movements. Avoid high-impact activities (jumping, running on hard surfaces) and deep, heavily loaded flexion in sensitive joints unless exercise is specifically designed to be gentle. Focus on controlled movements.';
   }
-  // Add other health risk flags as needed
 
-  // Enhanced instructions for JSON structure and rules
   return `
 You are an expert strength and conditioning coach AI. Your task is to generate a personalized 7-day workout plan.
 **Return RAW JSON ONLY. No markdown, no commentary, no introductory text before or after the JSON object.**
@@ -273,7 +251,7 @@ Workout Plan Rules:
 3.  For "Rest" days, the "exercises" field should be the string "Rest".
 4.  Distribute training days according to this guidance: "${spacing}". Prioritize muscle recovery.
 5.  ${user.has_gym_access
-    ? 'Since user has full gym access, primary lifts should be appropriately weighted. Up to 2 accessory glute-focused exercises from the special whitelist (${[...accessoryWL].join(', ')}) are allowed per training day, even if they are bodyweight or band.'
+    ? `Since user has full gym access, primary lifts should be appropriately weighted. Up to 2 accessory glute-focused exercises from the special whitelist (${[...accessoryWL].join(', ')}) are allowed per training day, even if they are bodyweight or band.`
     : `User has a home set-up. Adhere strictly to the allowed equipment: ${[...allowedEquip].join(', ')}.`}
 6.  On EACH training day, include EXACTLY 6 exercises. NO MORE, NO LESS.
 7.  Each exercise object MUST have: "name", "sets", "reps", and "notes" (can be an empty string "" or brief guidance).
@@ -302,47 +280,37 @@ Return JSON in this exact structure:
  * EQUIPMENT HELPER
  * ──────────────────────────────────────────────────────────*/
 function deriveAllowedEquipment(user) {
-  // Standard gym equipment if user has access
-  // Note: 'bodyweight' and 'resistance_band' are often implicitly available or explicitly listed.
   const gymEquipment = new Set([
     'barbell', 'dumbbell', 'kettlebell', 'machine', 'cable',
     'plate', 'resistance_band', 'bodyweight', 'smith', 'sled', 'trap_bar', 'ez_bar',
-    'bench', 'pull_up_bar', // Added bench and pull_up_bar as distinct gym equipment
+    'bench', 'pull_up_bar', // Trailing comma here is valid
   ]);
 
   if (user.has_gym_access) {
     return gymEquipment;
   }
 
-  // For home setups:
   const homeEquipmentMap = {
     'dumbbells': 'dumbbell',
     'resistance bands': 'resistance_band',
     'kettlebells': 'kettlebell',
-    'pull up bar': 'pull_up_bar', // Map to a more specific equipment type
-    'adjustable bench': 'bench', // Map to 'bench'
+    'pull up bar': 'pull_up_bar',
+    'adjustable bench': 'bench',
     'just bodyweight': 'bodyweight',
     'barbell': 'barbell',
     'ez bar': 'ez_bar',
-    'plates': 'plate',
-    // Add other common home equipment mappings as needed
+    'plates': 'plate', // Trailing comma here is valid
   };
 
-  const allowed = new Set(['bodyweight']); // Bodyweight is always a base
+  const allowed = new Set(['bodyweight']);
   (user.home_equipment || []).forEach(item => {
     const key = item.toLowerCase();
     if (homeEquipmentMap[key]) {
       allowed.add(homeEquipmentMap[key]);
     } else {
-      // If you want to allow any user-specified equipment not in the map:
-      // allowed.add(key);
-      // Or, log an unknown equipment type:
       console.log(`Unmapped home equipment item: "${item}" - will not be explicitly added unless it's a generic type already covered.`);
     }
   });
-  // Ensure that if specific equipment (like dumbbells) is added, related items (like bench, if it enhances dumbbell use)
-  // are considered, though this might be complex to manage perfectly here.
-  // For now, it relies on explicit listing or the 'has_gym_access' flag.
 
   return allowed;
 }
