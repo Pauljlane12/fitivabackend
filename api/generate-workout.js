@@ -21,7 +21,7 @@ export default async function handler(req, res) {
   console.log('✅ Received user data:', user);
 
   const prompt = buildWorkoutPrompt(user, exercises);
-  console.log('🧠 Prompt sent to GPT:', prompt.slice(0, 1000)); // log partial prompt for readability
+  console.log('🧠 Prompt sent to GPT:', prompt.slice(0, 1000)); // log first 1000 chars
 
   try {
     const completion = await openai.chat.completions.create({
@@ -31,24 +31,37 @@ export default async function handler(req, res) {
     });
 
     const gptContent = completion.choices[0]?.message?.content || '';
-    console.log('📩 GPT raw response:', gptContent.slice(0, 1000)); // limit log length
+    console.log('📩 GPT raw response:', gptContent.slice(0, 1000));
 
     let planJSON;
     try {
       planJSON = JSON.parse(gptContent);
-      console.log('✅ Parsed workout plan JSON:', planJSON);
+
+      // ✅ Validate output: must have workout_plan array with valid weekdays and 6 exercises per day
+      const validDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+      const isValid = Array.isArray(planJSON?.workout_plan) &&
+        planJSON.workout_plan.every(day =>
+          validDays.includes(day.day) && Array.isArray(day.exercises) && day.exercises.length === 6
+        );
+
+      if (!isValid) {
+        console.warn('⚠️ GPT output invalid or missing expected structure.');
+        return res.status(500).json({ error: 'GPT returned malformed workout plan' });
+      }
+
+      console.log('✅ Parsed and validated workout plan JSON:', planJSON);
+      return res.status(200).json({ plan: planJSON });
     } catch {
       console.warn('⚠️ GPT response was not valid JSON. Returning raw text instead.');
-      planJSON = { raw_text: gptContent };
+      return res.status(200).json({ raw_text: gptContent });
     }
-
-    return res.status(200).json({ plan: planJSON });
   } catch (err) {
     console.error('❌ GPT error:', err);
     return res.status(500).json({ error: 'Failed to generate workout plan' });
   }
 }
 
+// 🧠 PROMPT BUILDER — Updated to enforce 6 exercises + weekday names
 function buildWorkoutPrompt(user, allExercises) {
   const exerciseLines = allExercises.map(e => {
     const desc = e.description ? e.description.replace(/\n+/g, ' ') : 'No description';
@@ -56,46 +69,53 @@ function buildWorkoutPrompt(user, allExercises) {
     return `• ${e.name} — Muscle Group: ${e.muscle_group}, Equipment: ${e.equipment}, Difficulty: ${e.difficulty}, Tags: [${e.tags.join(', ')}], Description: ${desc}, Default: ${e.default_sets}x${e.default_reps}${weight}`;
   }).join('\n');
 
-  const freq = user.exercise_frequency || 3;
+  const freq = user.exercise_frequency || 5;
 
   return `
-You are a certified personal trainer designing a custom *${freq}-day-per-week* workout plan.
+You are a certified personal trainer designing a custom *${freq}-day-per-week* workout plan for the user below.
 
 ### USER PROFILE (JSON)
 ${JSON.stringify(user, null, 2)}
 
 ### EXERCISE CATALOG
-(Choose ONLY from this list.)
+(Choose ONLY from this list. Do NOT invent any exercises.)
 ${exerciseLines}
 
 ---
 
 ### INSTRUCTIONS
-1. Match the user's goal, experience, equipment, injuries, and preferences.
-2. Distribute volume across the week appropriately.
-3. Avoid any exercise that conflicts with injuries or unavailable equipment.
-4. Use defaults as guidelines but adjust sets/reps if justified.
-5. Do **NOT** invent new exercises.
+1. Match the user's goal, experience level, muscle group preferences, available equipment, and frequency.
+2. Build a ${freq}-day plan with workouts from **Monday to ${getEndDay(freq)}**.
+3. Provide **exactly 6 exercises per day**.
+4. Only use exercises from the provided catalog. If there aren't enough unique options, repeat or vary existing ones (e.g., sets/reps/tempo).
+5. Include a short "notes" field for each exercise explaining its purpose or target.
+6. Use the following output format exactly — valid, raw JSON only.
 
 ### REQUIRED OUTPUT (VALID JSON)
 {
   "workout_plan": [
     {
-      "day": "Day 1",
+      "day": "Monday",
       "exercises": [
         {
           "name": "Bodyweight Squat",
           "sets": 3,
           "reps": 12,
           "notes": "Targets quads and glutes."
-        }
+        },
+        ...
       ]
-    }
+    },
+    ...
   ]
 }
 
-• Use exactly this schema (no extra keys).  
-• If you must explain anything, add a "notes" field on each exercise.  
-• Do NOT wrap the JSON in markdown fences; just return raw JSON.
+Do NOT wrap the JSON in markdown fences. Just return raw, valid JSON.
 `;
+}
+
+// Weekday label helper
+function getEndDay(freq) {
+  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  return days[Math.min(freq - 1, 6)];
 }
