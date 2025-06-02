@@ -4,9 +4,12 @@ import exercises from '../data/exercises.js';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/** ──────────────────────────────────────────────────────────
+ *  MAIN HANDLER
+ *  ──────────────────────────────────────────────────────────*/
 export default async function handler(req, res) {
   const t0 = Date.now();
-  console.log('⚡️ generate-workout invoked');
+  console.log('⚡️  /api/generate-workout invoked');
 
   if (req.method !== 'POST')
     return res.status(405).json({ error: 'Method Not Allowed' });
@@ -16,10 +19,10 @@ export default async function handler(req, res) {
 
   const user = req.body;
 
-  /* ---------- helper so we can retry once ---------- */
-  for (let attempt = 0; attempt < 2; attempt++) {
+  /* ── We allow ONE automatic retry ── */
+  for (let attempt = 1; attempt <= 2; attempt++) {
     const prompt = buildPrompt(user, exercises);
-    console.log(`🧠 Prompt (attempt ${attempt + 1}) – chars:`, prompt.length);
+    console.log(`🧠  Prompt (attempt ${attempt}) – ${prompt.length} chars`);
 
     try {
       const { choices } = await openai.chat.completions.create({
@@ -29,133 +32,164 @@ export default async function handler(req, res) {
         max_tokens: 1800
       });
 
-      let txt = (choices[0]?.message?.content || '').trim()
+      /* ── Strip ``` fences ── */
+      let txt = (choices?.[0]?.message?.content || '')
+        .trim()
         .replace(/^```(?:json)?\s*/i, '')
         .replace(/\s*```[\s\n]*$/i, '');
 
-      console.log('📩 GPT size:', txt.length);
+      console.log('📩 GPT answer size:', txt.length, 'chars');
 
+      /* ── Parse JSON ── */
       let plan;
       try { plan = JSON.parse(txt); }
-      catch { throw new Error('json_parse'); }
+      catch {
+        console.warn('❗  GPT did not return valid JSON');
+        if (attempt === 2) return res.status(500).json({ error: 'Non-JSON twice' });
+        continue;
+      }
 
+      /* ── Validate ── */
       if (validatePlan(plan, user)) {
-        console.log('✅ OK –', Date.now() - t0, 'ms');
+        console.log('✅  Plan accepted in', Date.now() - t0, 'ms');
         return res.status(200).json({ plan });
       }
 
-      console.warn(`⚠️ Validation failed on attempt ${attempt + 1}`);
-      // Loop will retry once more; after that we fall through to error
+      console.warn(`⚠️  Validation failed on attempt ${attempt}`);
+      if (attempt === 2) {
+        console.error('Last bad plan (truncated):\n' + txt.slice(0, 1500));
+        return res.status(500).json({ error: 'GPT produced malformed plan twice, aborting.' });
+      }
     } catch (err) {
-      if (err.message === 'json_parse')
-        console.error('❌ GPT returned non-JSON');
-      else
-        console.error('❌ GPT request error:', err);
-      // break on network errors; keep loop for malformed plans
-      if (attempt === 1) return res.status(500).json({ error: 'GPT request failed' });
+      console.error('❌  GPT request error:', err);
+      return res.status(500).json({ error: 'GPT request failed' });
     }
   }
-
-  // both attempts failed validation
-  return res.status(500).json({ error: 'GPT produced malformed plan twice, aborting.' });
 }
 
-/* -------- PLAN VALIDATOR ---------- */
+/** ──────────────────────────────────────────────────────────
+ *  PLAN VALIDATOR
+ *  ──────────────────────────────────────────────────────────*/
 function validatePlan(plan, user) {
-  const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-  const allowedEquip = deriveAllowedEquipment(user);
-  const nameSet = new Set(exercises.map(e => e.name));
-  const byName  = Object.fromEntries(exercises.map(e => [e.name, e]));
+  const days          = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  const allowedEquip  = deriveAllowedEquipment(user);
+  const accessoryWL   = new Set(['Frog Pumps', 'Banded Lateral Walks']);   // always ok
+  const byName        = Object.fromEntries(exercises.map(e => [e.name, e]));
 
-  return Array.isArray(plan.workout_plan) &&
-    plan.workout_plan.length === 7 &&
-    plan.workout_plan.every(d =>
-      days.includes(d.day) &&
-      (
-        d.exercises === 'Rest' ||
-        (Array.isArray(d.exercises) &&
-         d.exercises.length === 6 &&                              // <-- strict rule
-         d.exercises.every(ex =>
-           nameSet.has(ex.name) &&
-           ex.sets === 3 &&
-           ex.reps >= 6 && ex.reps <= 12 &&
-           (typeof ex.start_weight_lb === 'number' || byName[ex.name].equipment === 'bodyweight') &&
-           allowedEquip.has(byName[ex.name].equipment)
-         ))
-      ));
+  if (!Array.isArray(plan.workout_plan) || plan.workout_plan.length !== 7) return false;
+
+  return plan.workout_plan.every(d => {
+    if (!days.includes(d.day)) return false;
+
+    /* Rest day is fine */
+    if (d.exercises === 'Rest') return true;
+
+    if (!Array.isArray(d.exercises) || d.exercises.length !== 6) return false;
+
+    return d.exercises.every(ex => {
+      const ref = byName[ex.name];
+      if (!ref) return false;                                  // not in catalog
+
+      /* Equipment rule */
+      const equipOk =
+        allowedEquip.has(ref.equipment) || accessoryWL.has(ex.name);
+
+      /* start_weight rule */
+      const needsWeight = ref.equipment !== 'bodyweight' && ref.equipment !== 'resistance_band';
+      const weightOk    = needsWeight
+        ? typeof ex.start_weight_lb === 'number'
+        : ex.start_weight_lb === undefined;
+
+      return (
+        ex.sets === 3 &&
+        ex.reps >= 6 && ex.reps <= 12 &&
+        equipOk &&
+        weightOk
+      );
+    });
+  });
 }
 
-/* ------------ Prompt builder -------------- */
+/** ──────────────────────────────────────────────────────────
+ *  PROMPT BUILDER
+ *  ──────────────────────────────────────────────────────────*/
 function buildPrompt(user, catalog) {
-  const musclesWanted = new Set(
-    (user.target_muscle_groups || user.fitness_areas || []).map(m => m.toLowerCase())
-  );
+  /* muscles to hit */
+  const wanted = new Set((user.target_muscle_groups || user.fitness_areas || [])
+    .map(m => m.toLowerCase()));
 
+  /* equipment rules */
   const allowedEquip = deriveAllowedEquipment(user);
+  const accessoryWL  = new Set(['Frog Pumps', 'Banded Lateral Walks']);
 
+  /* filter catalog */
   const usable = catalog.filter(e =>
-    (!musclesWanted.size || musclesWanted.has(e.muscle_group.toLowerCase())) &&
-    allowedEquip.has(e.equipment)
+    (!wanted.size || wanted.has(e.muscle_group.toLowerCase())) &&
+    (allowedEquip.has(e.equipment) || accessoryWL.has(e.name))
   );
 
-  const lines = usable.map(e =>
-    `• ${e.name} — ${e.muscle_group}, ${e.equipment}`
-  ).join('\n');
+  const catalogLines = usable
+    .map(e => `• ${e.name} — ${e.muscle_group}, ${e.equipment}`)
+    .join('\n');
 
+  /* frequency & spacing */
   const freq    = user.exercise_frequency || 4;
   const spacing = {3:'Mon/Wed/Fri',4:'Mon/Tue/Thu/Sat',5:'Mon/Tue/Thu/Fri/Sun'}[freq] ||
                   'spread training days for recovery';
 
-  const bw      = user.weight || 150;
-  const level   = (user.fitness_experience || 'intermediate').toLowerCase();
-  const mult    = {beginner:0.3,intermediate:0.5,advanced:0.7}[level] || 0.5;
+  /* starting-weight heuristic */
+  const bw   = user.weight || 150;
+  const lvl  = (user.fitness_experience || 'intermediate').toLowerCase();
+  const mult = {beginner:0.3,intermediate:0.5,advanced:0.7}[lvl] || 0.5;
 
+  /* risk flags */
   let flags = '';
   if (user.health_risks?.includes('pregnant'))
-    flags += '\n- Pregnant: low-impact, avoid heavy supine work after T1.';
+    flags += '\n- Pregnant: low-impact, avoid supine heavy work after T1.';
   if (user.health_risks?.some(r => /joint/i.test(r)))
     flags += '\n- Joint issues: avoid high-impact & deep loaded flexion.';
 
   return `
-You are an elite coach. Produce RAW JSON only.
+You are an elite strength coach. **Return RAW JSON only – no markdown**.
 
-• Train ${freq} days/week. Non-training days must be "Rest".
+Rules
+• Programme ${freq} training days/week, rest days = "Rest".
 • Space sessions smartly (${spacing}).
 ${user.has_gym_access
-  ? '• Gym available ⇒ weighted or machine lifts **only**; no body-weight primary moves.'
-  : `• Home equipment only ⇒ ${[...allowedEquip].join(', ')}.`}
-• Every workout day MUST have **exactly 6 exercises**. If not, regenerate before you answer.
-• Each exercise: {name, sets:3, reps:6-12, start_weight_lb, notes}.
-• start_weight_lb ≈ BW × levelMult (${bw}×${mult}=~${(bw*mult).toFixed(0)} lb) then adjusted reasonably.
-• Target only these muscles: ${[...musclesWanted].join(', ') || 'any'}.
-• Use ONLY exercises from the catalog – no new names.${flags}
+  ? '• User has full gym ⇒ primary lifts must be weighted; up to 2 accessory body-weight/band glute drills allowed (Frog Pumps, Banded Lateral Walks).'
+  : `• Home set-up ⇒ allowed equipment: ${[...allowedEquip].join(', ')}.`}
+• EXACTLY 6 exercises on each training day.
+• Each exercise: {name, sets:3, reps:6-12, start_weight_lb?, notes}.
+  – Omit start_weight_lb for body-weight or resistance-band moves.
+  – For weighted moves start_weight_lb ≈ BW × levelMult (${bw}×${mult} ≈ ${(bw*mult).toFixed(0)} lb) and adjust reasonably.
+• Target only: ${[...wanted].join(', ') || 'any'}.
+• Use **only** exercises in the catalog list (no new names).${flags}
 
 Catalog
-${lines}
+${catalogLines}
 
-Return JSON in this shape:
+Return exactly this structure:
 {
- "workout_plan":[
-   {"day":"Monday","exercises":[
-     {"name":"X","sets":3,"reps":10,"start_weight_lb":60,"notes":"..."},
-     ...
-   ]},
-   ...,
-   {"day":"Sunday","exercises":"Rest"}
+ "workout_plan": [
+   { "day": "Monday",    "exercises": [ { "name": "Hip Thrusts", "sets": 3, "reps": 8, "start_weight_lb": 135, "notes": "..." }, ... ] },
+   ...
+   { "day": "Sunday",    "exercises": "Rest" }
  ]
 }
 `.trim();
 }
 
-/* ---------- equipment helper ---------- */
+/** ──────────────────────────────────────────────────────────
+ *  EQUIPMENT HELPER
+ *  ──────────────────────────────────────────────────────────*/
 function deriveAllowedEquipment(user) {
   if (user.has_gym_access) {
-    // everything except pure body-weight
     return new Set([
       'barbell','dumbbell','kettlebell','machine','cable',
       'plate','resistance_band','smith','sled','trap_bar','ez_bar'
     ]);
   }
+
   const map = {
     dumbbells: 'dumbbell',
     'resistance bands': 'resistance_band',
@@ -164,7 +198,8 @@ function deriveAllowedEquipment(user) {
     'adjustable bench': 'dumbbell',
     'just bodyweight': 'bodyweight'
   };
-  const allowed = new Set(['bodyweight']);
+
+  const allowed = new Set(['bodyweight']);   // always allowed
   (user.home_equipment || []).forEach(item => {
     const key = item.toLowerCase();
     if (map[key]) allowed.add(map[key]);
