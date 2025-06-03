@@ -28,7 +28,7 @@ const approvedExercises = [
 
 /* ---------- helpers ---------- */
 const orderedDays = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-const abbr        = { Monday:'Mo', Tuesday:'Tu', Wednesday:'We', Thursday:'Th',
+const dow         = { Monday:'Mo', Tuesday:'Tu', Wednesday:'We', Thursday:'Th',
                       Friday:'Fr', Saturday:'Sa', Sunday:'Su' };
 const isApproved  = n => approvedExercises.includes(n);
 
@@ -49,21 +49,29 @@ export default async function handler(req, res) {
     const prompt = `
 You are a certified strength coach.
 
-Create a Monday–Sunday weighted-only routine.
+Create a weighted-only routine for Monday → Sunday.
 
-• EACH workout day must contain **exactly six (6)** approved exercises  
-• Provide a short **day label** (e.g. "Lower", "Upper", "Glute/Back", or "Rest")  
-• ≥80 % of total weekly movements must emphasise **${focus}**  
-• At least **two isolation-dominant days** for ${focus}  
-• No body-weight-only moves  
-• Use ONLY the "approvedExercises" list below  
-• Respond **ONLY with JSON** in this form — no markdown:
+Rules
+• **Exactly six (6)** approved exercises each workout day  
+• 4 – 6 total workout days (remaining days = rest)  
+• ≥80 % of weekly moves must emphasise **${focus}**  
+• Provide two isolation-dominant days for ${focus}  
+• No body-weight-only exercises  
+• Use ONLY the approvedExercises below  
+• Return **RAW JSON** (no markdown) with this shape:
 
 {
-  "Monday":   { "label": "Lower", "exercises": [ { "name": "...", "sets": 4, "reps": 12 }, … ] },
-  "Tuesday":  { "label": "Rest",  "exercises": [] },
+  "Monday": {
+    "abbr": "Lower",              // very short blanket term (Upper / Lower / Glute/Back / Rest)
+    "label": "Lower Body Power",  // longer UI title
+    "exercises": [
+      { "name": "Hip Thrusts", "sets": 4, "reps": 12 },
+      … exactly 6 objects …
+    ]
+  },
+  "Tuesday": { "abbr": "Rest", "label": "Rest Day", "exercises": [] },
   ...
-  "Sunday":   { "label": "Lower", "exercises": [ … ] }
+  "Sunday":  { ... }
 }
 
 User summary:
@@ -73,7 +81,7 @@ approvedExercises:
 ${approvedExercises.join(', ')}
 `.trim();
 
-    /* ----- GPT-4o, JSON-object mode ----- */
+    /* ----- GPT-4o in JSON-object mode ----- */
     const { choices } = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0.45,
@@ -84,7 +92,7 @@ ${approvedExercises.join(', ')}
     const raw = choices[0].message.content;
     console.log('🔵 RAW GPT JSON:', raw);
 
-    /* ----- parse & hard-enforce rules ----- */
+    /* ---------- parse & hard-enforce ---------- */
     let plan;
     try { plan = JSON.parse(raw); }
     catch (e) {
@@ -92,17 +100,43 @@ ${approvedExercises.join(', ')}
       return res.status(500).json({ error: 'LLM returned invalid JSON' });
     }
 
+    /* Build final guaranteed-valid plan */
     const finalPlan = {};
     for (const day of orderedDays) {
-      const dayObj  = plan[day] || {};
-      let   list    = Array.isArray(dayObj.exercises) ? dayObj.exercises : [];
+      const dayObj = plan?.[day] ?? {};
+      let list     = Array.isArray(dayObj.exercises) ? dayObj.exercises : [];
 
-      /* keep only approved moves & first 6 */
+      /* keep only approved & first 6 */
       list = list.filter(ex => ex && isApproved(ex.name)).slice(0, 6);
 
-      /* if not 6 → mark rest */
-      const label = list.length === 6 ? (dayObj.label || 'Workout') : 'Rest';
-      finalPlan[day] = { abbr: abbr[day], label, exercises: list.length === 6 ? list : [] };
+      /* determine abbr + label */
+      let abbrShort = (dayObj.abbr || '').trim();
+      let labelLong = (dayObj.label || '').trim();
+
+      if (list.length !== 6) {        // treat as rest if bad count
+        list       = [];
+        abbrShort  = 'Rest';
+        labelLong  = 'Rest Day';
+      } else {
+        /* fallback abbreviations if GPT missed them */
+        if (!abbrShort) {
+          const l = labelLong.toLowerCase();
+          abbrShort =
+            l.includes('upper') ? 'Upper' :
+            l.includes('lower') ? 'Lower' :
+            l.includes('glute')||l.includes('leg') ? 'Lower' :
+            l.includes('back')  ? 'Upper' :
+            'Workout';
+        }
+        if (!labelLong) labelLong = `${abbrShort} Workout`;
+      }
+
+      finalPlan[day] = {
+        dow: dow[day],        // Mo / Tu / …
+        abbr: abbrShort,      // Lower / Upper / Rest
+        label: labelLong,     // full title
+        exercises: list
+      };
     }
 
     console.log('✅ CLEAN PLAN:', JSON.stringify(finalPlan));
