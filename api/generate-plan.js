@@ -26,9 +26,9 @@ const approvedExercises = [
   'Walking Lunges','Wall Sit'
 ];
 
-/* ---------- util ---------- */
+/* ---------- helpers ---------- */
 const orderedDays    = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-const isApproved     = name => approvedExercises.includes(name);
+const isApproved     = n => approvedExercises.includes(n);
 const exerciseListMd = approvedExercises.map((e,i)=>`${i+1}. ${e}`).join('\n');
 
 export default async function handler(req, res) {
@@ -36,26 +36,26 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { summary='' } = req.body;
+    const { summary = '' } = req.body;
     if (typeof summary !== 'string' || !summary.trim())
       return res.status(400).json({ error: 'Missing or invalid summary' });
 
-    /* attempt to pull focus phrase so GPT knows what to bias toward */
-    const m = summary.match(/focus on (?:the following areas:)?\s*([^\.]+)/i);
-    const focus = m ? m[1].trim() : 'the selected areas';
+    /* --- pull focus areas so GPT biases selection --- */
+    const m      = summary.match(/focus on (?:the following areas:)?\s*([^\.]+)/i);
+    const focus  = m ? m[1].trim() : 'the selected areas';
 
-    /* ---------- GPT prompt ---------- */
+    /* ---------- prompt ---------- */
     const prompt = `
 Design a Monday–Sunday, weighted-only workout plan.
 
 RULES
-1. At least 80% of weekly exercises must target **${focus}**.
-2. No isolation for muscles outside that list.
-3. Use ONLY the approved exercise list.
-4. Hypertrophy rep scheme 3–4 × 8–15 (adjust only when logical).
+1. ≥80 % of weekly movements must target **${focus}**.
+2. No isolation work for muscles outside that list.
+3. Use ONLY exercises from the approved list.
+4. Hypertrophy sets/reps (3–4 × 8-15 unless logically different).
 5. No body-weight-only moves.
-6. Respond ONLY with minified JSON, exactly matching this shape:
-   {"Monday":[{"name":"Hip Thrusts","sets":4,"reps":10}], "Tuesday":"Rest", … "Sunday":"Rest"}
+6. **Respond with MINIFIED JSON ONLY** – no markdown or fences.
+   {"Monday":[{"name":"Hip Thrusts","sets":4,"reps":10}],"Tuesday":"Rest",...}
 
 User summary:
 ${summary}
@@ -74,32 +74,36 @@ Generate the JSON now.`.trim();
       ]
     });
 
-    /* ---------- parse / sanitise ---------- */
-    const raw = completion.choices[0].message.content.trim();
+    /* ---------- sanitise & parse LLM output ---------- */
+    let raw = completion.choices[0].message.content.trim();
 
-    let plan = JSON.parse(raw);   // throws on invalid JSON
+    // remove ```json or ``` fences if present
+    raw = raw
+      .replace(/^```(?:json)?\s*/i, '')   // opening fence
+      .replace(/\s*```$/i, '');           // closing fence
 
-    // ensure every weekday appears & clean bad data
+    let plan;
+    try {
+      plan = JSON.parse(raw);
+    } catch {
+      console.error('JSON parse error – raw LLM output:', raw);
+      return res.status(500).json({ error: 'LLM returned invalid JSON' });
+    }
+
+    /* ---------- normalise: ensure every weekday present ---------- */
     const cleanPlan = {};
     for (const day of orderedDays) {
-      let value = plan[day];
+      let val = plan[day];
 
-      // if day missing -> rest
-      if (value === undefined) value = 'Rest';
+      if (val === undefined || val === null) val = 'Rest';
 
-      // if empty array, or array with only empty objects -> rest
-      if (Array.isArray(value)) {
-        value = value.filter(
-          ex => ex && typeof ex === 'object' && Object.keys(ex).length
-        );
-
-        // strip un-approved exercise entries
-        value = value.filter(ex => isApproved(ex.name));
-
-        if (!value.length) value = 'Rest';
+      // convert empty arrays / arrays of empties to "Rest"
+      if (Array.isArray(val)) {
+        val = val.filter(ex => ex && typeof ex === 'object' && isApproved(ex.name));
+        if (!val.length) val = 'Rest';
       }
 
-      cleanPlan[day] = value;
+      cleanPlan[day] = val;
     }
 
     return res.status(200).json({ plan: cleanPlan });
