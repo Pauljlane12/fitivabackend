@@ -2,7 +2,7 @@
 import { OpenAI } from 'openai';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* -------- 65 approved weighted movements -------- */
+/* -------- approved weighted movements -------- */
 const approvedExercises = [
   'Hip Thrusts','Incline Dumbbell Curls','Incline Press (Machine or Dumbbell)',
   'Lat Pulldowns','Lat Pushdowns','Leg Extensions','Leg Lifts',
@@ -27,33 +27,40 @@ const approvedExercises = [
 ];
 
 const orderedDays = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-const isApproved  = n => approvedExercises.includes(n);
+const isApproved  = name => approvedExercises.includes(name);
 
 /* ------------------------------------------------ */
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error:'Method not allowed' });
+  if (req.method !== 'POST')
+    return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { summary='' } = req.body;
-    if (!summary.trim()) return res.status(400).json({ error:'Missing or invalid summary' });
+    const { summary = '' } = req.body;
+    if (!summary.trim())
+      return res.status(400).json({ error: 'Missing or invalid summary' });
 
-    const m      = summary.match(/focus on (?:the following areas:)?\s*([^\.]+)/i);
-    const focus  = m ? m[1].trim() : 'the selected areas';
+    /* ---------- build prompt ---------- */
+    const m     = summary.match(/focus on (?:the following areas:)?\s*([^\.]+)/i);
+    const focus = m ? m[1].trim() : 'the selected areas';
+
     const prompt = `
-Design a weighted-only workout plan, Monday through Sunday.
+Design a Monday – Sunday **weighted-only** workout plan.
 
-• ≥80 % of weekly exercises must target **${focus}**  
-• Use only the approved exercise list below  
-• 6 exercises max per workout day (omit a day entirely for rest)  
-• 3 – 4 sets × 8 – 15 reps unless logically different  
+Rules
+• Provide **exactly six (6) exercises** for every training day  
+• At least **four** training days (one to three rest days allowed)  
+• ≥80 % of all weekly exercises must directly target **${focus}**  
+• Include **at least two isolation-dominant days** focused on ${focus}  
+• Use ONLY the approved exercises listed below  
+• Default rep scheme 3–4 × 8–15 (adjust logically)  
 • No body-weight-only moves  
-• Respond *only* with a valid JSON object exactly in this shape:
+• Return **valid JSON** in this exact shape – nothing else:
 
 {
-  "Monday": [{ "name": "...", "sets": 4, "reps": 10 }, …],
-  "Tuesday": [],
-  …
-  "Sunday": []
+ "Monday": [ { "name": "...", "sets": 4, "reps": 12 }, … six total … ],
+ "Tuesday": [],
+ …
+ "Sunday": []
 }
 
 User summary:
@@ -63,39 +70,48 @@ Approved exercises:
 ${approvedExercises.join(', ')}
 `.trim();
 
-    /* ---------- GPT-4o in JSON mode ---------- */
-    const completion = await openai.chat.completions.create({
+    /* ---------- GPT-4o (native JSON) ---------- */
+    const { choices } = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0.5,
-      response_format: { type: 'json_object' },   // <-- the magic line
+      response_format: { type: 'json_object' },
       messages: [
-        { role:'system', content:'You are a certified strength coach.' },
-        { role:'user',   content: prompt }
+        { role: 'system', content: 'You are a certified strength coach.' },
+        { role: 'user',   content: prompt }
       ]
     });
 
-    const planRaw = completion.choices[0].message.content;
-    console.log('🔵 RAW GPT JSON:', planRaw);      // visible in Vercel logs
+    const rawJson = choices[0].message.content;
+    console.log('🔵 RAW GPT JSON:', rawJson);
 
-    /* ---------- sanitise ---------- */
+    /* ---------- sanitise & enforce ---------- */
     let plan;
     try {
-      plan = JSON.parse(planRaw);
+      plan = JSON.parse(rawJson);
     } catch (err) {
       console.error('❌ JSON parse error', err);
-      return res.status(500).json({ error:'LLM returned invalid JSON' });
+      return res.status(500).json({ error: 'LLM returned invalid JSON' });
     }
 
     const cleanPlan = {};
     for (const day of orderedDays) {
       let list = Array.isArray(plan[day]) ? plan[day] : [];
 
-      // accept up to 6 valid exercises
-      list = list
-        .filter(ex => ex && typeof ex === 'object' && isApproved(ex.name))
-        .slice(0, 6);
+      // keep only approved movements
+      list = list.filter(
+        ex => ex && typeof ex === 'object' && isApproved(ex.name)
+      );
 
-      cleanPlan[day] = list; // an empty array naturally means “rest”
+      // Enforce EXACTLY 6 exercises on training days
+      if (list.length === 0) {
+        cleanPlan[day] = [];               // rest day
+      } else if (list.length >= 6) {
+        cleanPlan[day] = list.slice(0, 6); // trim extras
+      } else {
+        // not enough → mark as rest (forces dev notice in logs)
+        console.warn(`⚠️  ${day} had only ${list.length} exercises; marking as rest`);
+        cleanPlan[day] = [];
+      }
     }
 
     console.log('✅ CLEAN PLAN:', JSON.stringify(cleanPlan));
@@ -103,6 +119,6 @@ ${approvedExercises.join(', ')}
 
   } catch (err) {
     console.error('🔥 Plan generation error:', err);
-    return res.status(500).json({ error:'Workout plan generation failed' });
+    return res.status(500).json({ error: 'Workout plan generation failed' });
   }
 }
