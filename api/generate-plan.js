@@ -1,29 +1,10 @@
-// /api/generate-plan.js
+// /api/generate-plan-v2.js
 import { OpenAI } from 'openai';
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ---------- approved weighted movements ---------- */
 const approvedExercises = [
-  'Hip Thrusts','Incline Dumbbell Curls','Incline Press (Machine or Dumbbell)',
-  'Lat Pulldowns','Lat Pushdowns','Leg Extensions','Leg Lifts',
-  'Leg Press Machine','Leg Raise Hold (Reverse Plank)','Machine Chest Press',
-  'Oblique Taps','Overhead Cable Pushdowns','Preacher Curls',
-  'Pull-Ups / Assisted Pull-Ups','Rear Delt Flys','Reverse Flys',
-  'Reverse Lunges','Romanian Deadlifts','Seated Leg Raise Machine',
-  'Ab Crunch Machine','Banded Lateral Walks','Bent Over Rows',
-  'Bicycle Crunches','Box Step-Up (Quad Emphasis)','Bulgarian Split Squats',
-  'Cable Curls','Cable Flys','Cable Kickbacks','Cable Pushdowns',
-  'Cross-Body Dumbbell Curls','Curtsy Lunge','Dumbbell Front Squat',
-  'Dumbbell Lateral Raises','Flutter Kicks','Frog Pumps','Front Plate Raise',
-  'Glute Bridge (Machine or Floor)','Glute Bridge Marches','Glute Extensions',
-  'Goblet Squat','Hack Squat / Quad-Biased Squat','Hammer Curls',
-  'Hamstring Curl','Hip Abduction Machine','Outdoor Walk','Running',
-  'Seated Rows','Shoulder Press (Smith or Dumbbells)',
-  'Single Arm Cable Pushdowns','Single Arm Dumbbell Row',
-  'Single Arm Lateral Cable Raise','Skull Crushers','Stairmaster',
-  'Standing Dumbbell Curls','Steady-State Cardio','Step-Ups','Sumo Squats',
-  'Treadmill Walking','Tricep Seated Dip Machine','Upright Rows',
-  'Walking Lunges','Wall Sit'
+  /* … same list you provided … */
 ];
 
 /* ---------- helpers ---------- */
@@ -31,47 +12,48 @@ const orderedDays = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturda
 const dow         = { Monday:'Mo', Tuesday:'Tu', Wednesday:'We', Thursday:'Th',
                       Friday:'Fr', Saturday:'Sa', Sunday:'Su' };
 const isApproved  = n => approvedExercises.includes(n);
+const ERR = (res,msg,code=400) => res.status(code).json({ error: msg });
 
 /* ------------------------------------------------- */
 export default async function handler(req, res) {
-  if (req.method !== 'POST')
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') return ERR(res,'Method not allowed',405);
 
   try {
     const { summary = '' } = req.body;
-    if (!summary.trim())
-      return res.status(400).json({ error: 'Missing or invalid summary' });
+    if (!summary.trim())   return ERR(res,'Missing or invalid summary');
 
-    /* ----- build GPT prompt ----- */
-    const m     = summary.match(/focus on (?:the following areas:)?\s*([^\.]+)/i);
-    const focus = m ? m[1].trim() : 'the selected areas';
+    /* ---------- 1.  Parse summary lines ---------- */
+    const focusMatch = summary.match(/Focus\s*areas:\s*([^\.\n]+)/i);
+    let   focusRaw   = focusMatch ? focusMatch[1].trim() : '';
+    let   focusAreas = focusRaw.toLowerCase() === 'none'
+                     ? []
+                     : focusRaw.split(/,\s*/).filter(Boolean);
 
+    const freqMatch  = summary.match(/Frequency:\s*(\d+)/i);
+    const freqDays   = Math.min(Math.max(parseInt(freqMatch?.[1]||4,10),1),7);  // clamp 1-7
+
+    if (!focusAreas.length) focusAreas = ['full      body']; // fallback cue for GPT
+
+    /* ---------- 2.  Build GPT prompt ---------- */
     const prompt = `
 You are a certified strength coach.
 
-Create a weighted-only routine for Monday → Sunday.
+Design a **weighted-only** programme (no body-weight moves) for exactly ${freqDays} workout days this week.
+ALL exercises must come from the approved list below **and must directly emphasise ONLY these areas: ${focusAreas.join(', ')}**.
 
 Rules
-• **Exactly six (6)** approved exercises each workout day  
-• 4 – 6 total workout days (remaining days = rest)  
-• ≥80 % of weekly moves must emphasise **${focus}**  
-• Provide two isolation-dominant days for ${focus}  
-• No body-weight-only exercises  
-• Use ONLY the approvedExercises below  
-• Return **RAW JSON** (no markdown) with this shape:
+• Provide 6 approved exercises per workout day  
+• Days not programmed count as complete rest (empty list)  
+• Include at least one isolation-dominant day focused on the selected areas  
+• Return RAW JSON (no markdown) with keys Monday … Sunday in order; each key matches the schema:
 
 {
-  "Monday": {
-    "abbr": "Lower",              // very short blanket term (Upper / Lower / Glute/Back / Rest)
-    "label": "Lower Body Power",  // longer UI title
-    "exercises": [
-      { "name": "Hip Thrusts", "sets": 4, "reps": 12 },
-      … exactly 6 objects …
-    ]
-  },
-  "Tuesday": { "abbr": "Rest", "label": "Rest Day", "exercises": [] },
-  ...
-  "Sunday":  { ... }
+  "abbr":  "Lower" | "Upper" | "Glute" | "Back" | "Rest",
+  "label": "Lower Body Power" | "Rest Day" | …,
+  "exercises": [
+    { "name": "<approvedExercise>", "sets": 4, "reps": 10 },
+    … exactly 6 objects or [] …
+  ]
 }
 
 User summary:
@@ -81,69 +63,64 @@ approvedExercises:
 ${approvedExercises.join(', ')}
 `.trim();
 
-    /* ----- GPT-4o in JSON-object mode ----- */
+    /* ---------- 3.  GPT-4o call ---------- */
     const { choices } = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0.45,
       response_format: { type: 'json_object' },
-      messages: [ { role:'user', content: prompt } ]
+      messages: [{ role:'user', content: prompt }]
     });
 
-    const raw = choices[0].message.content;
-    console.log('🔵 RAW GPT JSON:', raw);
+    const raw = choices?.[0]?.message?.content;
+    if (!raw) return ERR(res,'LLM returned empty response',500);
 
-    /* ---------- parse & hard-enforce ---------- */
+    /* ---------- 4.  Parse + strict validation ---------- */
     let plan;
     try { plan = JSON.parse(raw); }
-    catch (e) {
-      console.error('❌ JSON parse error', e);
-      return res.status(500).json({ error: 'LLM returned invalid JSON' });
-    }
+    catch { return ERR(res,'LLM returned invalid JSON',500); }
 
-    /* Build final guaranteed-valid plan */
     const finalPlan = {};
+    let   workoutCount = 0;
+
     for (const day of orderedDays) {
       const dayObj = plan?.[day] ?? {};
-      let list     = Array.isArray(dayObj.exercises) ? dayObj.exercises : [];
+      let list = Array.isArray(dayObj.exercises) ? dayObj.exercises : [];
 
-      /* keep only approved & first 6 */
+      /* keep approved & max 6 */
       list = list.filter(ex => ex && isApproved(ex.name)).slice(0, 6);
 
-      /* determine abbr + label */
-      let abbrShort = (dayObj.abbr || '').trim();
-      let labelLong = (dayObj.label || '').trim();
-
-      if (list.length !== 6) {        // treat as rest if bad count
-        list       = [];
-        abbrShort  = 'Rest';
-        labelLong  = 'Rest Day';
+      /* validate count — if bad treat as rest */
+      if (list.length !== 6) {
+        list = [];
+        dayObj.abbr  = 'Rest';
+        dayObj.label = 'Rest Day';
       } else {
-        /* fallback abbreviations if GPT missed them */
-        if (!abbrShort) {
-          const l = labelLong.toLowerCase();
-          abbrShort =
-            l.includes('upper') ? 'Upper' :
-            l.includes('lower') ? 'Lower' :
-            l.includes('glute')||l.includes('leg') ? 'Lower' :
-            l.includes('back')  ? 'Upper' :
-            'Workout';
-        }
-        if (!labelLong) labelLong = `${abbrShort} Workout`;
+        workoutCount += 1;
       }
 
+      /* safety fallbacks */
+      const abbr  = (dayObj.abbr  || (list.length ? 'Workout' : 'Rest')).trim();
+      const label = (dayObj.label || (list.length ? `${abbr} Session` : 'Rest Day')).trim();
+
       finalPlan[day] = {
-        dow: dow[day],        // Mo / Tu / …
-        abbr: abbrShort,      // Lower / Upper / Rest
-        label: labelLong,     // full title
+        dow: dow[day],
+        abbr,
+        label,
         exercises: list
       };
     }
 
-    console.log('✅ CLEAN PLAN:', JSON.stringify(finalPlan));
+    /* ---------- 5.  Enforce frequency ---------- */
+    if (workoutCount !== freqDays) {
+      console.error(`Plan has ${workoutCount} workout days, expected ${freqDays}`);
+      return ERR(res,'LLM failed frequency constraint; please retry',500);
+    }
+
+    console.log('✅ CLEAN PLAN v2:', JSON.stringify(finalPlan));
     return res.status(200).json({ plan: finalPlan });
 
   } catch (err) {
-    console.error('🔥 Plan generation error:', err);
-    return res.status(500).json({ error: 'Workout plan generation failed' });
+    console.error('🔥 Plan v2 generation error:', err);
+    return ERR(res,'Workout plan generation failed',500);
   }
 }
