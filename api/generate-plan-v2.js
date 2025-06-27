@@ -284,13 +284,22 @@ function validateAndCleanPlan(rawData) {
         }
       }
       
-      // Ensure we have some exercises (fallback)
-      if (cleanDay.exercises.length === 0) {
-        cleanDay.exercises = [
-          cleanAndValidateExercise({ name: 'Machine Chest Press' }, 0, dayName),
-          cleanAndValidateExercise({ name: 'Lat Pulldowns' }, 1, dayName),
-          cleanAndValidateExercise({ name: 'Leg Press Machine' }, 2, dayName)
-        ];
+      // CRITICAL: Ensure we have exactly 6 exercises (pad with safe fallbacks if needed)
+      const fallbackExercises = [
+        'Machine Chest Press', 'Lat Pulldowns', 'Leg Press Machine', 
+        'Shoulder Press', 'Hip Thrusts', 'Romanian Deadlifts',
+        'Seated Rows', 'Leg Extensions', 'Dumbbell Lateral Raises',
+        'Cable Curls', 'Tricep Seated Dip Machine', 'Hamstring Curl'
+      ];
+      
+      while (cleanDay.exercises.length < 6) {
+        const fallbackName = fallbackExercises[cleanDay.exercises.length % fallbackExercises.length];
+        cleanDay.exercises.push(cleanAndValidateExercise({ name: fallbackName }, cleanDay.exercises.length, dayName));
+      }
+      
+      // Ensure we never exceed 6 exercises
+      if (cleanDay.exercises.length > 6) {
+        cleanDay.exercises = cleanDay.exercises.slice(0, 6);
       }
       
       cleanPlan[dayName] = cleanDay;
