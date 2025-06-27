@@ -1,4 +1,5 @@
-// /api/generate-summary.js
+// pages/api/generate-summary.js
+
 import { OpenAI } from 'openai';
 
 const openai       = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -67,10 +68,10 @@ Health concerns: ${join(healthConcerns)}.
     const sanitizedSummary = choices[0].message.content.trim();
     console.log('🔧 SANITIZED SUMMARY:\n' + sanitizedSummary);
 
-    /* ---------- 4. Internal call to /api/generate-plan ---------- */
+    /* ---------- 4. Internal call to /api/generate-plan-v2 ---------- */
     const baseURL = makeBaseURL(req);
-    const url     = `${baseURL}/api/generate-plan`;
-    console.log('🌐 CALLING generate-plan at:', url);
+    const url     = `${baseURL}/api/generate-plan-v2`;  // ← updated to v2
+    console.log('🌐 CALLING generate-plan-v2 at:', url);
 
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), CALL_TIMEOUT);
@@ -84,7 +85,7 @@ Health concerns: ${join(healthConcerns)}.
 
     if (!planRes.ok) {
       const text = await planRes.text();
-      throw new Error(`generate-plan (${planRes.status}) → ${text.slice(0,180)}…`);
+      throw new Error(`generate-plan-v2 (${planRes.status}) → ${text.slice(0,180)}…`);
     }
 
     const { plan } = await planRes.json();
