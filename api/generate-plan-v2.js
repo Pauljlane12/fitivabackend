@@ -331,14 +331,20 @@ export default async function handler(req, res) {
     const prompt = `You are a certified strength coach. Create a workout plan for exactly ${freqDays} workout days this week.
 
 CRITICAL REQUIREMENTS:
-- Return RAW JSON only (no markdown, no explanations)
+- Return RAW JSON only (no markdown, no explanations)  
 - Each workout day must have EXACTLY 6 exercises - no more, no less
 - Each workout description must be EXACTLY 30 words - motivational and descriptive
+- Keep exercise details concise but complete
 - ALL exercise names must come from this approved list: ${approvedExercises.join(', ')}
 - Focus areas: ${focusAreas.join(', ')}
 - sets must always be 3
 - reps should be 8-15
 - recommendedWeight.intermediate must be > 0
+
+For efficiency, keep:
+- instructions: max 3 steps per exercise
+- tips: max 2 tips per exercise  
+- descriptions: 10-15 words per exercise
 
 Return this exact JSON structure:
 {
@@ -367,9 +373,9 @@ Return this exact JSON structure:
           "secondary": ["Triceps"]
         },
         "restTime": 90,
-        "description": "Builds chest strength",
-        "instructions": ["Sit on machine", "Press handles forward"],
-        "tips": ["Keep back against pad"],
+        "description": "Builds chest strength and power",
+        "instructions": ["Sit on machine", "Press handles forward", "Control the return"],
+        "tips": ["Keep back against pad", "Full range of motion"],
         "difficulty": "beginner",
         "progressions": {
           "easier": "Reduce weight",
@@ -527,7 +533,7 @@ User summary: ${summary}`;
     const { choices } = await openai.chat.completions.create({
       model: 'gpt-4o',
       temperature: 0.3,
-      max_tokens: 4000,
+      max_tokens: 8000, // Increased for larger responses
       response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }]
     });
@@ -545,14 +551,43 @@ User summary: ${summary}`;
       .replace(/```\s*$/i, '')
       .trim();
 
-    // Parse JSON
+    // Parse JSON with better error handling
     let rawData;
     try {
       rawData = JSON.parse(cleanedResponse);
     } catch (parseError) {
       console.error('JSON Parse Error:', parseError);
-      console.error('Raw response:', rawResponse.substring(0, 500));
-      throw new Error('Invalid JSON response from GPT-4o');
+      console.error('Response length:', cleanedResponse.length);
+      console.error('Raw response (first 1000 chars):', cleanedResponse.substring(0, 1000));
+      console.error('Raw response (last 500 chars):', cleanedResponse.substring(Math.max(0, cleanedResponse.length - 500)));
+      
+      // Try to fix common JSON issues
+      let fixedResponse = cleanedResponse;
+      
+      // If response was cut off, try to close it properly
+      if (!cleanedResponse.trim().endsWith('}')) {
+        // Count open braces vs closed braces
+        const openBraces = (cleanedResponse.match(/{/g) || []).length;
+        const closeBraces = (cleanedResponse.match(/}/g) || []).length;
+        const missingBraces = openBraces - closeBraces;
+        
+        if (missingBraces > 0) {
+          fixedResponse = cleanedResponse + '}'.repeat(missingBraces);
+          console.log('Attempting to fix truncated JSON by adding', missingBraces, 'closing braces');
+          
+          try {
+            rawData = JSON.parse(fixedResponse);
+            console.log('✅ Successfully fixed truncated JSON');
+          } catch (fixError) {
+            console.error('❌ Could not fix JSON:', fixError);
+            throw new Error('Invalid JSON response from GPT-4o');
+          }
+        } else {
+          throw new Error('Invalid JSON response from GPT-4o');
+        }
+      } else {
+        throw new Error('Invalid JSON response from GPT-4o');
+      }
     }
 
     console.log('✅ JSON parsed successfully');
