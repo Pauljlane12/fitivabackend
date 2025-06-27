@@ -215,6 +215,34 @@ function cleanAndValidateExercise(ex, index, dayName) {
   }
 }
 
+function validateDescription(description) {
+  if (!description || typeof description !== 'string') return null;
+  
+  const words = description.trim().split(/\s+/);
+  if (words.length === 30) return description;
+  
+  // If close to 30 words, try to adjust
+  if (words.length >= 25 && words.length <= 35) {
+    return words.slice(0, 30).join(' ');
+  }
+  
+  return null; // Let fallback handle it
+}
+
+function generateFallbackDescription(dayName) {
+  const fallbackDescriptions = {
+    'Monday': 'Start your week strong with this energizing upper body workout designed to build confidence, strength, and sculpted muscles for a powerful beginning.',
+    'Tuesday': 'Transform your Tuesday with this dynamic full body session targeting multiple muscle groups to boost metabolism, strength, and overall fitness levels effectively.',
+    'Wednesday': 'Midweek motivation awaits with this focused lower body workout designed to sculpt strong legs, powerful glutes, and build the foundation of strength.',
+    'Thursday': 'Thursday transformation begins with this comprehensive strength training session designed to challenge your muscles, boost confidence, and enhance your overall fitness journey.',
+    'Friday': 'Finish your week strong with this empowering workout designed to target key muscle groups, boost endurance, and leave you feeling accomplished and energized.',
+    'Saturday': 'Weekend warrior vibes begin with this intense training session designed to maximize strength gains, sculpt lean muscle, and elevate your fitness to new heights.',
+    'Sunday': 'Sunday strength session focuses on building a strong foundation with targeted exercises designed to enhance muscle definition, boost confidence, and prepare for success.'
+  };
+  
+  return fallbackDescriptions[dayName] || 'Complete this comprehensive workout designed to build strength, enhance muscle definition, boost confidence, and help you achieve your fitness goals with targeted exercises.';
+}
+
 function validateAndCleanPlan(rawData) {
   try {
     // Handle both wrapped and unwrapped responses
@@ -237,7 +265,7 @@ function validateAndCleanPlan(rawData) {
       
       const cleanDay = {
         title: (dayData.title || `${dayName} Workout`).substring(0, 50), // Limit length
-        description: dayData.description || `Workout session for ${dayName}`,
+        description: validateDescription(dayData.description) || generateFallbackDescription(dayName),
         estimatedDuration: Math.max(15, Math.min(120, parseInt(dayData.estimatedDuration) || 45)),
         intensity: dayData.intensity || 'moderate',
         exercises: []
@@ -304,7 +332,8 @@ export default async function handler(req, res) {
 
 CRITICAL REQUIREMENTS:
 - Return RAW JSON only (no markdown, no explanations)
-- Each workout day must have exactly 3-6 exercises
+- Each workout day must have EXACTLY 6 exercises - no more, no less
+- Each workout description must be EXACTLY 30 words - motivational and descriptive
 - ALL exercise names must come from this approved list: ${approvedExercises.join(', ')}
 - Focus areas: ${focusAreas.join(', ')}
 - sets must always be 3
@@ -315,7 +344,7 @@ Return this exact JSON structure:
 {
   "Monday": {
     "title": "Upper Body Strength",
-    "description": "Focus on upper body development",
+    "description": "Build powerful shoulders, sculpted arms, and a strong back with this comprehensive upper body session designed to enhance your strength and confidence.",
     "estimatedDuration": 45,
     "intensity": "moderate",
     "exercises": [
@@ -345,6 +374,146 @@ Return this exact JSON structure:
         "progressions": {
           "easier": "Reduce weight",
           "harder": "Increase weight"
+        }
+      },
+      {
+        "name": "Lat Pulldowns",
+        "sets": 3,
+        "reps": 12,
+        "equipment": {
+          "primary": "Cable Machine",
+          "alternatives": [{"name": "Resistance Bands"}]
+        },
+        "recommendedWeight": {
+          "beginner": 40,
+          "intermediate": 60,
+          "advanced": 80,
+          "userLevel": 60
+        },
+        "muscleGroups": {
+          "primary": ["Lats"],
+          "secondary": ["Biceps"]
+        },
+        "restTime": 75,
+        "description": "Builds back width",
+        "instructions": ["Pull bar to chest", "Squeeze shoulder blades"],
+        "tips": ["Lean back slightly"],
+        "difficulty": "beginner",
+        "progressions": {
+          "easier": "Use assisted machine",
+          "harder": "Add more weight"
+        }
+      },
+      {
+        "name": "Leg Press Machine",
+        "sets": 3,
+        "reps": 15,
+        "equipment": {
+          "primary": "Leg Press Machine",
+          "alternatives": [{"name": "Goblet Squat"}]
+        },
+        "recommendedWeight": {
+          "beginner": 90,
+          "intermediate": 135,
+          "advanced": 180,
+          "userLevel": 135
+        },
+        "muscleGroups": {
+          "primary": ["Quadriceps"],
+          "secondary": ["Glutes"]
+        },
+        "restTime": 90,
+        "description": "Builds leg strength",
+        "instructions": ["Lower with control", "Press through heels"],
+        "tips": ["Keep knees aligned"],
+        "difficulty": "beginner",
+        "progressions": {
+          "easier": "Reduce range of motion",
+          "harder": "Single leg variation"
+        }
+      },
+      {
+        "name": "Shoulder Press",
+        "sets": 3,
+        "reps": 10,
+        "equipment": {
+          "primary": "Dumbbells",
+          "alternatives": [{"name": "Machine"}]
+        },
+        "recommendedWeight": {
+          "beginner": 15,
+          "intermediate": 25,
+          "advanced": 35,
+          "userLevel": 25
+        },
+        "muscleGroups": {
+          "primary": ["Shoulders"],
+          "secondary": ["Triceps"]
+        },
+        "restTime": 75,
+        "description": "Builds shoulder strength",
+        "instructions": ["Press weights overhead", "Control the descent"],
+        "tips": ["Keep core engaged"],
+        "difficulty": "intermediate",
+        "progressions": {
+          "easier": "Seated variation",
+          "harder": "Standing single arm"
+        }
+      },
+      {
+        "name": "Hip Thrusts",
+        "sets": 3,
+        "reps": 12,
+        "equipment": {
+          "primary": "Barbell",
+          "alternatives": [{"name": "Dumbbells"}]
+        },
+        "recommendedWeight": {
+          "beginner": 45,
+          "intermediate": 85,
+          "advanced": 135,
+          "userLevel": 85
+        },
+        "muscleGroups": {
+          "primary": ["Glutes"],
+          "secondary": ["Hamstrings"]
+        },
+        "restTime": 90,
+        "description": "Builds glute strength",
+        "instructions": ["Drive hips up", "Squeeze glutes at top"],
+        "tips": ["Keep chin tucked"],
+        "difficulty": "intermediate",
+        "progressions": {
+          "easier": "Bodyweight variation",
+          "harder": "Single leg version"
+        }
+      },
+      {
+        "name": "Romanian Deadlifts",
+        "sets": 3,
+        "reps": 10,
+        "equipment": {
+          "primary": "Dumbbells",
+          "alternatives": [{"name": "Barbell"}]
+        },
+        "recommendedWeight": {
+          "beginner": 30,
+          "intermediate": 50,
+          "advanced": 70,
+          "userLevel": 50
+        },
+        "muscleGroups": {
+          "primary": ["Hamstrings"],
+          "secondary": ["Glutes"]
+        },
+        "restTime": 90,
+        "description": "Targets posterior chain",
+        "instructions": ["Hinge at hips", "Keep weights close"],
+        "tips": ["Feel stretch in hamstrings"],
+        "difficulty": "intermediate",
+        "progressions": {
+          "easier": "Reduce range of motion",
+          "harder": "Single leg variation"
         }
       }
     ]
