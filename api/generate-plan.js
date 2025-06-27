@@ -1,10 +1,11 @@
+// pages/api/generate-plan-v2.js
+
 import { OpenAI } from 'openai';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 
 // Initialize OpenAI client
-type Env = { OPENAI_API_KEY: string };
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Initialize AJV for schema validation
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -33,7 +34,7 @@ const approvedExercises = [
   'Treadmill Walking','Tricep Seated Dip Machine','Upright Rows',
   'Walking Lunges','Wall Sit'
 ];
-const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g,' ');
+const normalize = s => s.trim().toLowerCase().replace(/\s+/g,' ');
 const approvedSet = new Set(approvedExercises.map(normalize));
 
 // JSON schema for enriched workout plan
@@ -54,7 +55,12 @@ const planSchema = {
               type: 'array',
               items: {
                 type: 'object',
-                required: ['id','name','sets','reps','equipment','recommendedWeight','muscleGroups','restTime','description','instructions','tips','difficulty','progressions'],
+                required: [
+                  'id','name','sets','reps','equipment',
+                  'recommendedWeight','muscleGroups','restTime',
+                  'description','instructions','tips',
+                  'difficulty','progressions'
+                ],
                 properties: {
                   id: { type: 'string' },
                   name: { type: 'string' },
@@ -96,7 +102,14 @@ const planSchema = {
                     required: ['easier','harder'],
                     properties: { easier: { type: 'string' }, harder: { type: 'string' } }
                   },
-                  tempo: { type: 'object', properties: { eccentric: { type: 'number' }, pauseBottom: { type: 'number' }, concentric: { type: 'number' } } }
+                  tempo: {
+                    type: 'object',
+                    properties: {
+                      eccentric: { type: 'number' },
+                      pauseBottom: { type: 'number' },
+                      concentric: { type: 'number' }
+                    }
+                  }
                 }
               }
             }
@@ -122,7 +135,9 @@ export default async function handler(req, res) {
 
     // Extract focus areas & frequency
     const focusMatch = summary.match(/Focus\s*(?:areas|on)\s*[:\-]?\s*([^\.\n]+)/i);
-    let focusAreas = focusMatch ? focusMatch[1].split(/,\s*/).map(s => s.trim()) : ['full body'];
+    const focusAreas = focusMatch
+      ? focusMatch[1].split(/,\s*/).map(s => s.trim())
+      : ['full body'];
     const freqMatch = summary.match(/Frequency\s*[:\-]?\s*(\d+)/i);
     const freqDays = Math.min(Math.max(parseInt(freqMatch?.[1] || '4', 10), 1), 7);
 
@@ -166,29 +181,29 @@ ${summary}`;
     // Custom enforcement
     let dayCount = 0;
     for (const [day, dayObj] of Object.entries(data.plan)) {
-      // Day title word count
-      const titleWords = dayObj.title.trim().split(/\s+/).length;
-      if (titleWords > 4) throw new Error(`Day title too many words: ${dayObj.title}`);
+      // Title ≤ 4 words
+      if (dayObj.title.trim().split(/\s+/).length > 4)
+        throw new Error(`Day title too long: ${dayObj.title}`);
 
-      if (Array.isArray(dayObj.exercises)) {
-        if (dayObj.exercises.length > 0) dayCount++;
+      if (Array.isArray(dayObj.exercises) && dayObj.exercises.length > 0) {
+        dayCount++;
         dayObj.exercises.forEach(ex => {
           if (ex.sets !== 3) throw new Error(`Exercise sets≠3: ${ex.name}`);
-          const wordCount = ex.name.trim().split(/\s+/).length;
-          if (wordCount > 4) throw new Error(`Name >4 words: ${ex.name}`);
-          const norm = normalize(ex.name);
-          if (!approvedSet.has(norm)) throw new Error(`Unapproved exercise: ${ex.name}`);
-          if (ex.recommendedWeight.intermediate <= 0) throw new Error(`Intermediate weight invalid: ${ex.name}`);
-          if (ex.equipment.primary.trim().toLowerCase() === 'bodyweight') {
+          if (ex.name.trim().split(/\s+/).length > 4)
+            throw new Error(`Name >4 words: ${ex.name}`);
+          if (!approvedSet.has(normalize(ex.name)))
+            throw new Error(`Unapproved exercise: ${ex.name}`);
+          if (ex.recommendedWeight.intermediate <= 0)
+            throw new Error(`Invalid intermediate weight: ${ex.name}`);
+          if (ex.equipment.primary.trim().toLowerCase() === 'bodyweight')
             throw new Error(`Primary equipment cannot be bodyweight: ${ex.name}`);
-          }
         });
       }
     }
 
-    // Check frequency match
+    // Ensure workout count matches freqDays
     if (dayCount !== freqDays) {
-      return ERR(res, `Plan day count ${dayCount} does not match frequency ${freqDays}`, 500);
+      return ERR(res, `Plan day count ${dayCount} ≠ requested ${freqDays}`, 500);
     }
 
     // All good
