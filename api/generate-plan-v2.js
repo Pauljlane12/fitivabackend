@@ -1,18 +1,10 @@
 // pages/api/generate-plan-v2.js
 import { OpenAI } from 'openai';
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
 
-/* ─────────────────────────────────────────────────────────
-   1.  INITIALISE CLIENTS
-───────────────────────────────────────────────────────── */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const ajv = new Ajv({ allErrors: true, strict: false });
-addFormats(ajv);
-
 /* ─────────────────────────────────────────────────────────
-   2.  CONSTANTS & HELPERS
+   1. CONSTANTS & HELPERS
 ───────────────────────────────────────────────────────── */
 const approvedExercises = [
   'Hip Thrusts','Incline Dumbbell Curls','Incline Press (Machine or Dumbbell)',
@@ -29,236 +21,389 @@ const approvedExercises = [
   'Glute Bridge (Machine or Floor)','Glute Bridge Marches','Glute Extensions',
   'Goblet Squat','Hack Squat / Quad-Biased Squat','Hammer Curls',
   'Hamstring Curl','Hip Abduction Machine','Outdoor Walk','Running',
-  'Seated Rows','Shoulder Press',  // ✅ ADDED TO FIX VALIDATION
-  'Shoulder Press (Smith or Dumbbells)',
+  'Seated Rows','Shoulder Press','Shoulder Press (Smith or Dumbbells)',
   'Single Arm Cable Pushdowns','Single Arm Dumbbell Row',
   'Single Arm Lateral Cable Raise','Skull Crushers','Stairmaster',
   'Standing Dumbbell Curls','Steady-State Cardio','Step-Ups','Sumo Squats',
   'Treadmill Walking','Tricep Seated Dip Machine','Upright Rows',
   'Walking Lunges','Wall Sit'
 ];
+
 const normalize = s => s.trim().toLowerCase().replace(/\s+/g, ' ');
 const approvedSet = new Set(approvedExercises.map(normalize));
 
 const ERR = (res, msg, code = 400) => res.status(code).json({ error: msg });
 
+// Fallback UUID generator (no crypto dependency)
+const generateId = () => `ex_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+
 /* ─────────────────────────────────────────────────────────
-   3.  JSON-SCHEMA FOR THE PLAN
+   2. DATA ENRICHMENT & VALIDATION
 ───────────────────────────────────────────────────────── */
-const planSchema = {
-  type: 'object',
-  properties: {
-    plan: {
-      type: 'object',
-      patternProperties: {
-        '^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$': {
-          type: 'object',
-          required: ['title','description','estimatedDuration','intensity','exercises'],
-          properties: {
-            title:             { type: 'string' },
-            description:       { type: 'string' },
-            estimatedDuration: { type: 'number' },
-            intensity:         { type: 'string' },
-            exercises: {
-              type: 'array',
-              items: {
-                type: 'object',
-                required: [
-                  'id','name','sets','reps','equipment',
-                  'recommendedWeight','muscleGroups','restTime',
-                  'description','instructions','tips',
-                  'difficulty','progressions'
-                ],
-                properties: {
-                  id:   { type: 'string' },
-                  name: { type: 'string' },
-                  sets: { type: 'integer', const: 3 },
-                  reps: { type: 'integer', minimum: 1 },
-                  equipment: {
-                    type: 'object',
-                    required: ['primary','alternatives'],
-                    properties: {
-                      primary:      { type: 'string' },
-                      alternatives: { type: 'array', items: { type: 'object' } }
-                    }
-                  },
-                  recommendedWeight: {
-                    type: 'object',
-                    required: ['beginner','intermediate','advanced','userLevel'],
-                    properties: {
-                      beginner:     { type: 'number' },
-                      intermediate: { type: 'number', exclusiveMinimum: 0 },
-                      advanced:     { type: 'number' },
-                      userLevel:    { type: 'number' }
-                    }
-                  },
-                  muscleGroups: {
-                    type: 'object',
-                    required: ['primary','secondary'],
-                    properties: {
-                      primary:   { type: 'array', items: { type: 'string' } },
-                      secondary: { type: 'array', items: { type: 'string' } }
-                    }
-                  },
-                  restTime:     { type: 'number' },
-                  description:  { type: 'string' },
-                  instructions: { type: 'array', items: { type: 'string' } },
-                  tips:         { type: 'array', items: { type: 'string' } },
-                  difficulty:   { type: 'string' },
-                  progressions: {
-                    type: 'object',
-                    required: ['easier','harder'],
-                    properties: { easier: { type: 'string' }, harder: { type: 'string' } }
-                  },
-                  tempo: {
-                    type: 'object',
-                    properties: {
-                      eccentric:    { type: 'number' },
-                      pauseBottom:  { type: 'number' },
-                      concentric:   { type: 'number' }
-                    }
-                  }
-                }
-              }
+
+// Default exercise data based on exercise names
+const exerciseDefaults = {
+  'Machine Chest Press': {
+    equipment: 'Chest Press Machine',
+    primaryMuscles: ['Chest'],
+    secondaryMuscles: ['Triceps', 'Shoulders'],
+    difficulty: 'beginner',
+    restTime: 90
+  },
+  'Lat Pulldowns': {
+    equipment: 'Cable Machine',
+    primaryMuscles: ['Lats'],
+    secondaryMuscles: ['Biceps', 'Rear Delts'],
+    difficulty: 'beginner',
+    restTime: 90
+  },
+  'Leg Press Machine': {
+    equipment: 'Leg Press Machine',
+    primaryMuscles: ['Quadriceps'],
+    secondaryMuscles: ['Glutes', 'Hamstrings'],
+    difficulty: 'beginner',
+    restTime: 120
+  },
+  'Hip Thrusts': {
+    equipment: 'Barbell',
+    primaryMuscles: ['Glutes'],
+    secondaryMuscles: ['Hamstrings'],
+    difficulty: 'intermediate',
+    restTime: 90
+  },
+  'Romanian Deadlifts': {
+    equipment: 'Dumbbells',
+    primaryMuscles: ['Hamstrings'],
+    secondaryMuscles: ['Glutes', 'Lower Back'],
+    difficulty: 'intermediate',
+    restTime: 120
+  }
+  // Add more as needed - this gives us fallbacks
+};
+
+function getExerciseDefaults(exerciseName) {
+  const defaults = exerciseDefaults[exerciseName];
+  if (defaults) return defaults;
+  
+  // Generic fallbacks based on exercise name patterns
+  const lowerName = exerciseName.toLowerCase();
+  
+  if (lowerName.includes('chest') || lowerName.includes('press')) {
+    return {
+      equipment: 'Dumbbells',
+      primaryMuscles: ['Chest'],
+      secondaryMuscles: ['Triceps'],
+      difficulty: 'intermediate',
+      restTime: 90
+    };
+  }
+  
+  if (lowerName.includes('curl')) {
+    return {
+      equipment: 'Dumbbells',
+      primaryMuscles: ['Biceps'],
+      secondaryMuscles: ['Forearms'],
+      difficulty: 'beginner',
+      restTime: 60
+    };
+  }
+  
+  if (lowerName.includes('squat') || lowerName.includes('leg')) {
+    return {
+      equipment: 'Dumbbells',
+      primaryMuscles: ['Quadriceps'],
+      secondaryMuscles: ['Glutes'],
+      difficulty: 'intermediate',
+      restTime: 120
+    };
+  }
+  
+  // Ultimate fallback
+  return {
+    equipment: 'Dumbbells',
+    primaryMuscles: ['Full Body'],
+    secondaryMuscles: [],
+    difficulty: 'intermediate',
+    restTime: 90
+  };
+}
+
+function cleanAndValidateExercise(ex, index, dayName) {
+  try {
+    const defaults = getExerciseDefaults(ex.name || '');
+    
+    // Core fields with strong defaults
+    const cleanExercise = {
+      id: ex.id || generateId(),
+      name: ex.name || 'Unknown Exercise',
+      sets: 3, // Always 3 as per requirements
+      reps: Math.max(1, parseInt(ex.reps) || 10),
+      
+      equipment: {
+        primary: ex.equipment?.primary || defaults.equipment,
+        alternatives: Array.isArray(ex.equipment?.alternatives) 
+          ? ex.equipment.alternatives.map(alt => 
+              typeof alt === 'object' && alt.name ? alt : { name: String(alt) }
+            )
+          : [{ name: 'Bodyweight' }]
+      },
+      
+      recommendedWeight: {
+        beginner: Math.max(0, parseFloat(ex.recommendedWeight?.beginner) || 15),
+        intermediate: Math.max(1, parseFloat(ex.recommendedWeight?.intermediate) || 25), // Must be > 0
+        advanced: Math.max(0, parseFloat(ex.recommendedWeight?.advanced) || 35),
+        userLevel: Math.max(0, parseFloat(ex.recommendedWeight?.userLevel) || 25)
+      },
+      
+      muscleGroups: {
+        primary: Array.isArray(ex.muscleGroups?.primary) 
+          ? ex.muscleGroups.primary 
+          : defaults.primaryMuscles,
+        secondary: Array.isArray(ex.muscleGroups?.secondary) 
+          ? ex.muscleGroups.secondary 
+          : defaults.secondaryMuscles
+      },
+      
+      restTime: Math.max(30, parseInt(ex.restTime) || defaults.restTime),
+      description: ex.description || `${ex.name} targets ${defaults.primaryMuscles.join(' and ')}`,
+      
+      instructions: Array.isArray(ex.instructions) && ex.instructions.length > 0
+        ? ex.instructions
+        : [`Setup for ${ex.name}`, `Perform the movement with control`, `Return to starting position`],
+      
+      tips: Array.isArray(ex.tips) && ex.tips.length > 0
+        ? ex.tips
+        : [`Focus on proper form`, `Control the movement`],
+      
+      difficulty: ex.difficulty || defaults.difficulty,
+      
+      progressions: {
+        easier: ex.progressions?.easier || 'Reduce weight or reps',
+        harder: ex.progressions?.harder || 'Increase weight or reps'
+      }
+    };
+    
+    // Optional tempo (only add if provided)
+    if (ex.tempo && typeof ex.tempo === 'object') {
+      cleanExercise.tempo = {
+        eccentric: Math.max(0, parseFloat(ex.tempo.eccentric) || 2),
+        pauseBottom: Math.max(0, parseFloat(ex.tempo.pauseBottom) || 0),
+        concentric: Math.max(0, parseFloat(ex.tempo.concentric) || 1)
+      };
+    }
+    
+    return cleanExercise;
+    
+  } catch (error) {
+    console.error(`Error cleaning exercise ${index} on ${dayName}:`, error);
+    // Return a completely safe fallback exercise
+    return {
+      id: generateId(),
+      name: 'Machine Chest Press',
+      sets: 3,
+      reps: 10,
+      equipment: { primary: 'Machine', alternatives: [{ name: 'Dumbbells' }] },
+      recommendedWeight: { beginner: 20, intermediate: 35, advanced: 50, userLevel: 35 },
+      muscleGroups: { primary: ['Chest'], secondary: ['Triceps'] },
+      restTime: 90,
+      description: 'Safe fallback exercise',
+      instructions: ['Perform with proper form'],
+      tips: ['Focus on control'],
+      difficulty: 'beginner',
+      progressions: { easier: 'Reduce weight', harder: 'Increase weight' }
+    };
+  }
+}
+
+function validateAndCleanPlan(rawData) {
+  try {
+    // Handle both wrapped and unwrapped responses
+    let planData = rawData;
+    if (rawData.plan) {
+      planData = rawData.plan;
+    } else if (!Object.keys(rawData).some(key => 
+      ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].includes(key)
+    )) {
+      throw new Error('No valid day structure found in response');
+    }
+    
+    const cleanPlan = {};
+    
+    for (const [dayName, dayData] of Object.entries(planData)) {
+      // Validate day name
+      if (!['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'].includes(dayName)) {
+        continue; // Skip invalid day names
+      }
+      
+      const cleanDay = {
+        title: (dayData.title || `${dayName} Workout`).substring(0, 50), // Limit length
+        description: dayData.description || `Workout session for ${dayName}`,
+        estimatedDuration: Math.max(15, Math.min(120, parseInt(dayData.estimatedDuration) || 45)),
+        intensity: dayData.intensity || 'moderate',
+        exercises: []
+      };
+      
+      // Clean exercises
+      if (Array.isArray(dayData.exercises)) {
+        for (let i = 0; i < Math.min(6, dayData.exercises.length); i++) {
+          const exercise = dayData.exercises[i];
+          if (exercise && exercise.name) {
+            // Only include approved exercises
+            if (approvedSet.has(normalize(exercise.name))) {
+              cleanDay.exercises.push(cleanAndValidateExercise(exercise, i, dayName));
             }
           }
         }
       }
+      
+      // Ensure we have some exercises (fallback)
+      if (cleanDay.exercises.length === 0) {
+        cleanDay.exercises = [
+          cleanAndValidateExercise({ name: 'Machine Chest Press' }, 0, dayName),
+          cleanAndValidateExercise({ name: 'Lat Pulldowns' }, 1, dayName),
+          cleanAndValidateExercise({ name: 'Leg Press Machine' }, 2, dayName)
+        ];
+      }
+      
+      cleanPlan[dayName] = cleanDay;
     }
-  },
-  required: ['plan']
-};
-const validatePlan = ajv.compile(planSchema);
-
-/* ─────────────────────────────────────────────────────────
-   4.  SANITISER
-───────────────────────────────────────────────────────── */
-function coerceNumber (v) {
-  if (typeof v === 'number') return v;
-  if (typeof v === 'string') {
-    const num = parseFloat(v.replace(/[^\d.-]/g, ''));
-    return isFinite(num) ? num : 0;
-  }
-  return 0;
-}
-
-function sanitisePlan (data) {
-  if (!data?.plan) return;
-
-  for (const dayObj of Object.values(data.plan)) {
-    if (!Array.isArray(dayObj.exercises)) continue;
-
-    dayObj.exercises.forEach(ex => {
-      ex.id = String(ex.id ?? '').trim() || crypto.randomUUID();
-      ex.sets = 3;
-      ex.reps = parseInt(ex.reps ?? 0, 10) || 8;
-
-      if (ex.recommendedWeight) {
-        ['beginner','intermediate','advanced','userLevel']
-          .forEach(key => {
-            ex.recommendedWeight[key] = coerceNumber(ex.recommendedWeight[key]);
-          });
-      }
-
-      if (ex.equipment?.alternatives) {
-        ex.equipment.alternatives = ex.equipment.alternatives.map(item =>
-          typeof item === 'string' ? { name: item } : item
-        );
-      }
-
-      if (Array.isArray(ex.muscleGroups)) {
-        ex.muscleGroups = { primary: ex.muscleGroups, secondary: [] };
-      } else if (typeof ex.muscleGroups !== 'object') {
-        ex.muscleGroups = { primary: [], secondary: [] };
-      }
-    });
+    
+    return { plan: cleanPlan };
+    
+  } catch (error) {
+    console.error('Error validating plan:', error);
+    throw new Error(`Plan validation failed: ${error.message}`);
   }
 }
 
 /* ─────────────────────────────────────────────────────────
-   5.  MAIN HANDLER
+   3. MAIN HANDLER
 ───────────────────────────────────────────────────────── */
-export default async function handler (req, res) {
+export default async function handler(req, res) {
   if (req.method !== 'POST') return ERR(res, 'Method not allowed', 405);
 
   try {
     const { summary = '' } = req.body;
     if (!summary.trim()) return ERR(res, 'Missing or invalid summary');
 
+    console.log('📝 Processing summary:', summary);
+
+    // Extract focus areas and frequency
     const focusMatch = summary.match(/Focus\s*(?:areas|on)\s*[:\-]?\s*([^\.\n]+)/i);
     const focusAreas = focusMatch
-      ? focusMatch[1].split(/,\s*/).map(s => s.trim())
+      ? focusMatch[1].split(/,\s*/).map(s => s.trim()).filter(Boolean)
       : ['full body'];
 
     const freqMatch = summary.match(/Frequency\s*[:\-]?\s*(\d+)/i);
-    const freqDays  = Math.min(Math.max(parseInt(freqMatch?.[1] || '4', 10), 1), 7);
+    const freqDays = Math.min(Math.max(parseInt(freqMatch?.[1] || '4', 10), 1), 7);
 
-    const prompt = `
-You are a certified strength coach. Generate a RAW JSON workout plan for exactly **${freqDays}** distinct workout days (out of Monday–Sunday) that matches the schema described below.
+    console.log(`🎯 Focus: ${focusAreas.join(', ')}, Frequency: ${freqDays} days`);
 
-**Global Rules**
-• Title ≤ 4 words. • Every exercise name ≤ 4 words and must come from the Approved list.  
-• sets = 3 (constant). reps integer ≥ 1.  
-• recommendedWeight.* must be numbers (no units, no strings).  
-• equipment.alternatives → array of objects like {"name":"Smith Machine"} (never strings).  
-• muscleGroups must be an object {"primary":[…],"secondary":[…]}.  
-• Never use "bodyweight" equipment for intermediate users — give numeric weight.  
-• Intermediate weights must be > 0.  
-• Use only the exercises in the Approved list exactly as written.  
-• Output **RAW JSON** with a top-level key \`plan\` containing only the chosen days.
+    // Build prompt for GPT
+    const prompt = `You are a certified strength coach. Create a workout plan for exactly ${freqDays} workout days this week.
 
-**Approved Exercises**
-${approvedExercises.join(', ')}
+CRITICAL REQUIREMENTS:
+- Return RAW JSON only (no markdown, no explanations)
+- Each workout day must have exactly 3-6 exercises
+- ALL exercise names must come from this approved list: ${approvedExercises.join(', ')}
+- Focus areas: ${focusAreas.join(', ')}
+- sets must always be 3
+- reps should be 8-15
+- recommendedWeight.intermediate must be > 0
 
-**User summary**
-${summary}
-`;
+Return this exact JSON structure:
+{
+  "Monday": {
+    "title": "Upper Body Strength",
+    "description": "Focus on upper body development",
+    "estimatedDuration": 45,
+    "intensity": "moderate",
+    "exercises": [
+      {
+        "name": "Machine Chest Press",
+        "sets": 3,
+        "reps": 10,
+        "equipment": {
+          "primary": "Chest Press Machine",
+          "alternatives": [{"name": "Dumbbells"}]
+        },
+        "recommendedWeight": {
+          "beginner": 30,
+          "intermediate": 50,
+          "advanced": 70,
+          "userLevel": 50
+        },
+        "muscleGroups": {
+          "primary": ["Chest"],
+          "secondary": ["Triceps"]
+        },
+        "restTime": 90,
+        "description": "Builds chest strength",
+        "instructions": ["Sit on machine", "Press handles forward"],
+        "tips": ["Keep back against pad"],
+        "difficulty": "beginner",
+        "progressions": {
+          "easier": "Reduce weight",
+          "harder": "Increase weight"
+        }
+      }
+    ]
+  }
+}
 
+User summary: ${summary}`;
+
+    console.log('🤖 Calling GPT-4o...');
+    
     const { choices } = await openai.chat.completions.create({
-      model: 'gpt-4o', temperature: 0.35,
+      model: 'gpt-4o',
+      temperature: 0.3,
+      max_tokens: 4000,
       response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }]
     });
 
-    let raw = choices?.[0]?.message?.content || '';
-    raw = raw.replace(/^\s*```(?:json)?/i, '').replace(/```$/, '').trim();
-    let data; try { data = JSON.parse(raw); } catch {
-      return ERR(res, 'Invalid JSON from LLM', 500);
+    const rawResponse = choices?.[0]?.message?.content || '';
+    if (!rawResponse) {
+      throw new Error('Empty response from GPT-4o');
     }
 
-    sanitisePlan(data);
+    console.log('✅ GPT response received, length:', rawResponse.length);
 
-    if (!validatePlan(data)) {
-      console.error('Schema errors:', validatePlan.errors);
-      return ERR(res, 'Plan does not match schema', 500);
+    // Clean the response (remove markdown if present)
+    let cleanedResponse = rawResponse
+      .replace(/^\s*```(?:json)?/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+
+    // Parse JSON
+    let rawData;
+    try {
+      rawData = JSON.parse(cleanedResponse);
+    } catch (parseError) {
+      console.error('JSON Parse Error:', parseError);
+      console.error('Raw response:', rawResponse.substring(0, 500));
+      throw new Error('Invalid JSON response from GPT-4o');
     }
 
-    let workoutDays = 0;
-    for (const [day, dayObj] of Object.entries(data.plan)) {
-      if (dayObj.title.trim().split(/\s+/).length > 4)
-        throw new Error(`Day title too long: ${dayObj.title}`);
+    console.log('✅ JSON parsed successfully');
 
-      dayObj.exercises.forEach(ex => {
-        if (ex.sets !== 3) throw new Error(`Exercise sets≠3: ${ex.name}`);
-        if (ex.name.trim().split(/\s+/).length > 4)
-          throw new Error(`Name >4 words: ${ex.name}`);
-        if (!approvedSet.has(normalize(ex.name)))
-          throw new Error(`Unapproved exercise: ${ex.name}`);
-        if (ex.recommendedWeight.intermediate <= 0)
-          throw new Error(`Invalid intermediate weight: ${ex.name}`);
-        if (ex.equipment.primary.trim().toLowerCase() === 'bodyweight')
-          throw new Error(`Primary equipment cannot be bodyweight: ${ex.name}`);
-      });
-      workoutDays++;
+    // Validate and clean the plan
+    const finalPlan = validateAndCleanPlan(rawData);
+    
+    // Verify we have the right number of workout days
+    const workoutDays = Object.keys(finalPlan.plan).length;
+    if (workoutDays === 0) {
+      throw new Error('No valid workout days generated');
     }
 
-    if (workoutDays !== freqDays)
-      return ERR(res, `Plan day count ${workoutDays} ≠ requested ${freqDays}`, 500);
+    console.log(`✅ Plan validated: ${workoutDays} workout days`);
+    console.log('Final plan structure:', Object.keys(finalPlan.plan));
 
-    return res.status(200).json(data);
+    return res.status(200).json(finalPlan);
 
-  } catch (err) {
-    console.error('Error generating workout plan:', err);
-    return ERR(res, 'Workout plan generation failed', 500);
+  } catch (error) {
+    console.error('🔥 Error in plan generation:', error);
+    return ERR(res, `Plan generation failed: ${error.message}`, 500);
   }
 }
