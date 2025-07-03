@@ -3,8 +3,7 @@ import { OpenAI } from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PROD_DOMAIN = 'https://fitivabackend.vercel.app';     // ← change if you move the prod domain
-const CALL_TIMEOUT = 20_000;                                // 20s internal timeout (reduced from 80s)
-const RESPONSE_TIMEOUT = 25_000;                            // 25s response timeout (matches Vercel limits)
+const RESPONSE_TIMEOUT = 50_000;                            // 50s response timeout (increased for debugging)
 
 /* ------------- helpers ------------- */
 const join = a => (Array.isArray(a) && a.length ? a.join(', ') : 'none');
@@ -24,6 +23,8 @@ const makeBaseURL = req => {
 export default async function handler(req, res) {
   if (req.method !== 'POST')
     return res.status(405).json({ error: 'Method not allowed' });
+
+  console.log('🚀 Handler started at:', new Date().toISOString());
 
   // Set response timeout to prevent Vercel from killing the function
   const responseTimeout = setTimeout(() => {
@@ -65,6 +66,7 @@ Health concerns: ${join(healthConcerns)}.
     console.log('📝 SUMMARY:\n' + summary);
 
     /* ---------- 3. (optional) GPT-3.5 echo to strip stray tokens ---------- */
+    console.log('🤖 Starting OpenAI call at:', new Date().toISOString());
     const { choices } = await openai.chat.completions.create({
       model: 'gpt-3.5-turbo',
       temperature: 0,
@@ -75,25 +77,24 @@ Health concerns: ${join(healthConcerns)}.
     });
 
     const sanitizedSummary = choices[0].message.content.trim();
+    console.log('🤖 OpenAI call completed at:', new Date().toISOString());
     console.log('🔧 SANITIZED SUMMARY:\n' + sanitizedSummary);
 
     /* ---------- 4. Internal call to /api/generate-plan-v2 ---------- */
     const baseURL = makeBaseURL(req);
     const url = `${baseURL}/api/generate-plan-v2`;  // ← updated to v2
     console.log('🌐 CALLING generate-plan-v2 at:', url);
+    console.log('⏰ Starting internal API call at:', new Date().toISOString());
 
-    const abort = new AbortController();
-    const timer = setTimeout(() => {
-      console.log('⏰ Internal request timeout, aborting...');
-      abort.abort();
-    }, CALL_TIMEOUT);
-
+    // Remove AbortController - let Vercel handle timeouts
     const planRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ summary: sanitizedSummary }),
-      signal: abort.signal
-    }).finally(() => clearTimeout(timer));
+      body: JSON.stringify({ summary: sanitizedSummary })
+    });
+
+    console.log('✨ Internal API call completed at:', new Date().toISOString());
+    console.log('📊 Response status:', planRes.status);
 
     if (!planRes.ok) {
       const text = await planRes.text();
@@ -111,14 +112,15 @@ Health concerns: ${join(healthConcerns)}.
 
   } catch (err) {
     console.error('🔥 Summary pipeline error:', err);
+    console.error('🔥 Error stack:', err.stack);
     clearTimeout(responseTimeout);
     
     if (!res.headersSent) {
       // Better error messages based on error type
-      if (err.name === 'AbortError') {
-        return res.status(500).json({ error: 'Request timeout - the operation took too long' });
-      } else if (err.message.includes('generate-plan-v2')) {
+      if (err.message.includes('generate-plan-v2')) {
         return res.status(500).json({ error: 'Plan generation failed - please try again' });
+      } else if (err.message.includes('fetch')) {
+        return res.status(500).json({ error: 'Internal API call failed - please try again' });
       } else {
         return res.status(500).json({ error: 'Summary + Plan generation failed' });
       }
