@@ -613,34 +613,19 @@ User summary: ${summary}`;
     console.log(`✅ Plan validated: ${workoutDays} workout days`);
     console.log('Final plan structure:', Object.keys(finalPlan.plan));
 
-    // 🏋️ DETAILED EXERCISE BREAKDOWN LOGGING
-    console.log('\n🏋️ DETAILED EXERCISE BREAKDOWN:');
-    console.log('='.repeat(50));
+    // 🏋️ CONCISE EXERCISE BREAKDOWN LOGGING (faster)
+    console.log('\n🏋️ WORKOUT PLAN SUMMARY:');
+    console.log('='.repeat(40));
     
     Object.entries(finalPlan.plan).forEach(([day, workout]) => {
-      console.log(`\n📅 ${day.toUpperCase()} - ${workout.title}`);
-      console.log(`Duration: ${workout.estimatedDuration} min | Intensity: ${workout.intensity}`);
-      console.log(`Description: ${workout.description}`);
-      console.log('─'.repeat(30));
-      
-      workout.exercises.forEach((exercise, i) => {
-        console.log(`\n${i + 1}. ${exercise.name}`);
-        console.log(`   Sets: ${exercise.sets} | Reps: ${exercise.reps} | Rest: ${exercise.restTime}s`);
-        console.log(`   Equipment: ${exercise.equipment.primary}`);
-        console.log(`   Weight (Intermediate): ${exercise.recommendedWeight.intermediate} lbs`);
-        console.log(`   Primary: ${exercise.muscleGroups.primary.join(', ')}`);
-        console.log(`   Secondary: ${exercise.muscleGroups.secondary.join(', ')}`);
-        console.log(`   Description: ${exercise.description}`);
-        console.log(`   Instructions: ${exercise.instructions.join(' → ')}`);
-        console.log(`   Tips: ${exercise.tips.join(' | ')}`);
-        console.log(`   Difficulty: ${exercise.difficulty}`);
+      console.log(`\n📅 ${day}: ${workout.title} (${workout.estimatedDuration}min)`);
+      workout.exercises.forEach((ex, i) => {
+        console.log(`  ${i+1}. ${ex.name} - ${ex.sets}x${ex.reps} @ ${ex.recommendedWeight.intermediate}lbs`);
+        console.log(`     ${ex.muscleGroups.primary.join('/')} | ${ex.equipment.primary}`);
       });
-      
-      console.log('─'.repeat(30));
     });
     
-    console.log('\n' + '='.repeat(50));
-    console.log('🏋️ EXERCISE BREAKDOWN COMPLETE');
+    console.log('\n' + '='.repeat(40));
 
     return res.status(200).json(finalPlan);
 
