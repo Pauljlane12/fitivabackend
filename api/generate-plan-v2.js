@@ -613,6 +613,35 @@ User summary: ${summary}`;
     console.log(`✅ Plan validated: ${workoutDays} workout days`);
     console.log('Final plan structure:', Object.keys(finalPlan.plan));
 
+    // 🏋️ DETAILED EXERCISE BREAKDOWN LOGGING
+    console.log('\n🏋️ DETAILED EXERCISE BREAKDOWN:');
+    console.log('='.repeat(50));
+    
+    Object.entries(finalPlan.plan).forEach(([day, workout]) => {
+      console.log(`\n📅 ${day.toUpperCase()} - ${workout.title}`);
+      console.log(`Duration: ${workout.estimatedDuration} min | Intensity: ${workout.intensity}`);
+      console.log(`Description: ${workout.description}`);
+      console.log('─'.repeat(30));
+      
+      workout.exercises.forEach((exercise, i) => {
+        console.log(`\n${i + 1}. ${exercise.name}`);
+        console.log(`   Sets: ${exercise.sets} | Reps: ${exercise.reps} | Rest: ${exercise.restTime}s`);
+        console.log(`   Equipment: ${exercise.equipment.primary}`);
+        console.log(`   Weight (Intermediate): ${exercise.recommendedWeight.intermediate} lbs`);
+        console.log(`   Primary: ${exercise.muscleGroups.primary.join(', ')}`);
+        console.log(`   Secondary: ${exercise.muscleGroups.secondary.join(', ')}`);
+        console.log(`   Description: ${exercise.description}`);
+        console.log(`   Instructions: ${exercise.instructions.join(' → ')}`);
+        console.log(`   Tips: ${exercise.tips.join(' | ')}`);
+        console.log(`   Difficulty: ${exercise.difficulty}`);
+      });
+      
+      console.log('─'.repeat(30));
+    });
+    
+    console.log('\n' + '='.repeat(50));
+    console.log('🏋️ EXERCISE BREAKDOWN COMPLETE');
+
     return res.status(200).json(finalPlan);
 
   } catch (error) {
