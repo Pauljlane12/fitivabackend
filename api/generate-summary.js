@@ -3,7 +3,7 @@ import { OpenAI } from 'openai';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const PROD_DOMAIN = 'https://fitivabackend.vercel.app';     // ← change if you move the prod domain
-const RESPONSE_TIMEOUT = 50_000;                            // 50s response timeout (increased for debugging)
+const RESPONSE_TIMEOUT = 90_000;                            // 90s response timeout (increased for detailed logging)
 
 /* ------------- helpers ------------- */
 const join = a => (Array.isArray(a) && a.length ? a.join(', ') : 'none');
@@ -86,12 +86,22 @@ Health concerns: ${join(healthConcerns)}.
     console.log('🌐 CALLING generate-plan-v2 at:', url);
     console.log('⏰ Starting internal API call at:', new Date().toISOString());
 
-    // Remove AbortController - let Vercel handle timeouts
+    // Add AbortController back but with longer timeout
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      console.log('⏰ Internal request taking too long, aborting...');
+      abort.abort();
+    }, 75000); // 75 seconds (increased for detailed logging)
+
     const planRes = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ summary: sanitizedSummary })
-    });
+      headers: { 
+        'Content-Type': 'application/json',
+        'User-Agent': 'internal-api-call'
+      },
+      body: JSON.stringify({ summary: sanitizedSummary }),
+      signal: abort.signal
+    }).finally(() => clearTimeout(timer));
 
     console.log('✨ Internal API call completed at:', new Date().toISOString());
     console.log('📊 Response status:', planRes.status);
@@ -103,6 +113,24 @@ Health concerns: ${join(healthConcerns)}.
 
     const { plan } = await planRes.json();
     console.log('✅ PLAN RECEIVED:', JSON.stringify(plan));
+    
+    // 🏋️ LOG DETAILED EXERCISE BREAKDOWN
+    console.log('\n🏋️ DETAILED EXERCISE BREAKDOWN:');
+    Object.keys(plan).forEach(day => {
+      if (plan[day].exercises && plan[day].exercises.length > 0) {
+        console.log(`\n📅 ${day.toUpperCase()} - ${plan[day].title}:`);
+        plan[day].exercises.forEach((exercise, i) => {
+          console.log(`  ${i+1}. ${exercise.name || 'Unknown Exercise'}`);
+          console.log(`     Sets: ${exercise.sets || 'N/A'} | Reps: ${exercise.reps || 'N/A'}`);
+          console.log(`     Target: ${exercise.targetMuscles?.join(', ') || 'N/A'}`);
+          console.log(`     Equipment: ${exercise.equipment || 'N/A'}`);
+          if (exercise.instructions) {
+            console.log(`     Instructions: ${exercise.instructions.substring(0, 100)}...`);
+          }
+          console.log('');
+        });
+      }
+    });
 
     /* ---------- 5. Return only the plan ---------- */
     clearTimeout(responseTimeout);
@@ -117,7 +145,10 @@ Health concerns: ${join(healthConcerns)}.
     
     if (!res.headersSent) {
       // Better error messages based on error type
-      if (err.message.includes('generate-plan-v2')) {
+      if (err.name === 'AbortError') {
+        console.error('🔥 Request was aborted due to timeout');
+        return res.status(500).json({ error: 'Request timeout - the plan generation took too long' });
+      } else if (err.message.includes('generate-plan-v2')) {
         return res.status(500).json({ error: 'Plan generation failed - please try again' });
       } else if (err.message.includes('fetch')) {
         return res.status(500).json({ error: 'Internal API call failed - please try again' });
